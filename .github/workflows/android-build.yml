@@ -27,7 +27,7 @@ jobs:
         run: go mod download
 
       - name: Build APK
-        run: fyne package -os android -appID com.nezhahq.agent -src ./cmd/agent
+        run: fyne package -os android --app-id com.nezhahq.agent --tags gui --source-dir ./cmd/agent
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
