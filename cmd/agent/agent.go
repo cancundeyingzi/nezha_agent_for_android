@@ -415,6 +415,11 @@ func runService(action string, path string) {
 }
 
 func receiveTasksDaemon(tasks pb.NezhaService_RequestTaskClient, cancel context.CancelFunc) {
+	defer func() {
+		if r := recover(); r != nil {
+			printf("receiveTasksDaemon panic: %v", r)
+		}
+	}()
 	var task *pb.Task
 	var err error
 	for {
@@ -429,7 +434,7 @@ func receiveTasksDaemon(tasks pb.NezhaService_RequestTaskClient, cancel context.
 		go func(t *pb.Task) {
 			defer func() {
 				if err := recover(); err != nil {
-					println("task panic", task, err)
+					println("task panic", t, err)
 				}
 			}()
 			result := doTask(t)
@@ -481,6 +486,11 @@ func doTask(task *pb.Task) *pb.TaskResult {
 
 // reportStateDaemon 向server上报状态信息
 func reportStateDaemon(stateClient pb.NezhaService_ReportSystemStateClient, cancel context.CancelFunc) {
+	defer func() {
+		if r := recover(); r != nil {
+			printf("reportStateDaemon panic: %v", r)
+		}
+	}()
 	var err error
 	for {
 		lastReportHostInfo, lastReportIPInfo, err = reportState(stateClient, lastReportHostInfo, lastReportIPInfo)
@@ -1135,6 +1145,11 @@ func lookupIP(hostOrIp string) (string, error) {
 }
 
 func ioStreamKeepAlive(ctx context.Context, stream pb.NezhaService_IOStreamClient) {
+	defer func() {
+		if r := recover(); r != nil {
+			printf("ioStreamKeepAlive panic: %v", r)
+		}
+	}()
 	ticker := time.Tick(30 * time.Second)
 
 	for {
@@ -1158,10 +1173,16 @@ func doWithTimeout[T any](fn func() (T, error), timeout time.Duration) (T, error
 	var err error
 	go func() {
 		defer cancel()
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("panic in doWithTimeout: %v", r)
+				printf("doWithTimeout hook caught panic: %v", r)
+			}
+		}()
 		t, err = fn()
 	}()
 	<-timeoutCtx.Done()
-	if timeoutCtx.Err() != context.Canceled {
+	if timeoutCtx.Err() != context.Canceled && err == nil {
 		return t, fmt.Errorf("context error: %v, fn err: %v", timeoutCtx.Err(), err)
 	}
 	return t, err

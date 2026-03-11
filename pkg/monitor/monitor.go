@@ -248,6 +248,13 @@ func updateTemperatureStat() {
 	}
 	defer updateTempStatus.Store(false)
 
+	// 保护因设备平台（如 Android）热量传感器受限引发的底层 Panic
+	defer func() {
+		if r := recover(); r != nil {
+			printf("updateTemperatureStat panic: %v", r)
+		}
+	}()
+
 	stat := tryStat(context.Background(), Temperatures, temperature.GetState)
 	temperatureStat = stat
 }

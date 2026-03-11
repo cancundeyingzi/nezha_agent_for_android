@@ -50,6 +50,11 @@ func FetchIP(useIPv6CountryCode bool) *pb.GeoIP {
 	wg.Add(2)
 	var ipv4, ipv6 string
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Printf("FetchIP (IPv4) panic: %v", r)
+			}
+		}()
 		defer wg.Done()
 		if len(CustomEndpoints) > 0 {
 			ipv4 = fetchIP(CustomEndpoints, false)
@@ -58,6 +63,11 @@ func FetchIP(useIPv6CountryCode bool) *pb.GeoIP {
 		}
 	}()
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Printf("FetchIP (IPv6) panic: %v", r)
+			}
+		}()
 		defer wg.Done()
 		if len(CustomEndpoints) > 0 {
 			ipv6 = fetchIP(CustomEndpoints, true)
