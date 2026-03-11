@@ -74,7 +74,7 @@ fun MainScreen() {
             .verticalScroll(scrollState),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Text("哪吒探针 (Android 原生版)", style = MaterialTheme.typography.headlineMedium)
+        Text("哪吒探针", style = MaterialTheme.typography.headlineMedium)
 
         // 一键解析面板的安装指令
         Card(shape = RoundedCornerShape(12.dp)) {
