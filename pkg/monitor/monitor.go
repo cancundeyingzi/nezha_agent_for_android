@@ -63,6 +63,7 @@ var statDataFetchAttempts = map[uint8]uint8{
 
 var (
 	updateTempStatus atomic.Bool
+	hostLock         sync.Mutex
 	stateLock        sync.Mutex
 )
 
@@ -72,6 +73,8 @@ func InitConfig(cfg *model.AgentConfig) {
 
 // GetHost 获取主机硬件信息
 func GetHost() *model.Host {
+	hostLock.Lock()
+	defer hostLock.Unlock()
 	var ret model.Host
 
 	var cpuType string
