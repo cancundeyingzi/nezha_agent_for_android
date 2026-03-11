@@ -9,28 +9,50 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # 配置 Go 编译环境
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.24.x'
 
+      # 配置 JDK 环境（Android SDK 构建需要）
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
+      # 安装 Android NDK（Fyne CGO 交叉编译 Android 必需）
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r27d
+          add-to-path: true
+          link-to-sdk: true
+
+      # 安装 Fyne CLI 工具
       - name: Install Fyne CLI
         run: go install fyne.io/tools/cmd/fyne@latest
 
+      # 下载 Go 模块依赖
       - name: Download Modules
         run: go mod download
 
+      # 构建 Android APK
+      # --tags gui 激活 GUI build tag 以编译 Fyne 界面代码
+      # --source-dir 指定包含 main.go 和 FyneApp.toml 的目录
       - name: Build APK
-        run: fyne package -os android --app-id com.nezhahq.agent --tags gui --source-dir ./cmd/agent
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: fyne package -os android/arm64 --app-id com.nezhahq.agent --tags gui --source-dir ./cmd/agent
 
+      # 上传构建产物到 GitHub Artifacts
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: nezha-agent-android
-          path: '*.apk'
+          path: |
+            *.apk
+            cmd/agent/*.apk
