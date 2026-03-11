@@ -62,7 +62,7 @@ fun MainScreen() {
     var secret by remember { mutableStateOf(ConfigStore.getSecret(context)) }
     var uuid by remember { mutableStateOf(ConfigStore.getUuid(context)) }
     var useTls by remember { mutableStateOf(ConfigStore.getUseTls(context)) }
-    var rootMode by remember { mutableStateOf(false) }
+    var rootMode by remember { mutableStateOf(ConfigStore.getRootMode(context)) }
     var clipboardInput by remember { mutableStateOf("") }
     
     val scrollState = rememberScrollState()
@@ -175,8 +175,8 @@ fun MainScreen() {
             Button(
                 onClick = {
                     val p = port.toIntOrNull() ?: 5555
-                    // 持久化加密存储密钥
-                    ConfigStore.saveConfig(context, server, p, secret, useTls, uuid)
+                    // 持久化加密存储密钥以及特权设置
+                    ConfigStore.saveConfig(context, server, p, secret, useTls, uuid, rootMode)
                     val intent = Intent(context, AgentService::class.java)
                     // 适配 Android O 以上严格的前台服务启动规则
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

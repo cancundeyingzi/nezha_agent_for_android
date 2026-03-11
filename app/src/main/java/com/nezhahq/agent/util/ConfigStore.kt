@@ -23,13 +23,14 @@ object ConfigStore {
         )
     }
 
-    fun saveConfig(context: Context, server: String, port: Int, secret: String, useTLS: Boolean = true, uuid: String = "") {
+    fun saveConfig(context: Context, server: String, port: Int, secret: String, useTLS: Boolean = true, uuid: String = "", rootMode: Boolean = false) {
         getEncryptedPrefs(context).edit().apply {
             putString("server", server)
             putInt("port", port)
             putString("secret", secret)
             putBoolean("use_tls", useTLS)
             putString("uuid", uuid)
+            putBoolean("root_mode", rootMode)
             apply()
         }
     }
@@ -39,6 +40,7 @@ object ConfigStore {
     fun getSecret(context: Context): String = getEncryptedPrefs(context).getString("secret", "") ?: ""
     fun getUuid(context: Context): String = getEncryptedPrefs(context).getString("uuid", "") ?: ""
     fun getUseTls(context: Context): Boolean = getEncryptedPrefs(context).getBoolean("use_tls", true)
+    fun getRootMode(context: Context): Boolean = getEncryptedPrefs(context).getBoolean("root_mode", false)
     
     fun hasValidConfig(context: Context): Boolean {
         return getServer(context).isNotEmpty() && getSecret(context).isNotEmpty() && getUuid(context).isNotEmpty()
