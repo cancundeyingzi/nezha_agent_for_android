@@ -6,9 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 	"regexp"
-	"runtime"
 	"strings"
 
 	"fyne.io/fyne/v2"
@@ -114,12 +112,9 @@ func main() {
 				SkipProcsCount:        true, // Android 上进程数统计可能受权限限制
 			}
 
-			// 在已 Root 的 Android 设备上（可选）启用命令执行
-			if runtime.GOOS == "android" {
-				if err := exec.Command("su", "-c", "echo root").Run(); err == nil {
-					agentConfig.DisableCommandExecute = false
-				}
-			}
+			// 在移动端由于安全性限制以及 SElinux/seccomp 的影响，
+			// 不应该尝试使用 exec.Command 执行外部命令（如 "su"），因为这可能导致 SIGSYS 从而让进程强制崩溃。
+			// 移动端始终禁用 Command Execute，即使以 root 运行也不应在此执行外部探测。
 
 			// 预运行环境初始化
 			setEnv()

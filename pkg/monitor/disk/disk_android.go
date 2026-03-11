@@ -9,7 +9,8 @@ package disk
 
 import (
 	"context"
-	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // android 上需要检查的关键挂载点
@@ -26,8 +27,8 @@ func GetHost(_ context.Context) (uint64, error) {
 	// Android 上多个挂载点可能指向同一分区
 	// 取报告的最大值作为总空间（通常是 /data 分区）
 	for _, mp := range androidMountPoints {
-		var stat syscall.Statfs_t
-		if err := syscall.Statfs(mp, &stat); err != nil {
+		var stat unix.Statfs_t
+		if err := unix.Statfs(mp, &stat); err != nil {
 			continue
 		}
 
@@ -46,8 +47,8 @@ func GetState(_ context.Context) (uint64, error) {
 	var maxUsed uint64
 
 	for _, mp := range androidMountPoints {
-		var stat syscall.Statfs_t
-		if err := syscall.Statfs(mp, &stat); err != nil {
+		var stat unix.Statfs_t
+		if err := unix.Statfs(mp, &stat); err != nil {
 			continue
 		}
 
