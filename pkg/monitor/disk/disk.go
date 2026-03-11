@@ -1,3 +1,5 @@
+//go:build !android
+
 package disk
 
 import (
@@ -11,10 +13,6 @@ import (
 
 	"github.com/nezhahq/agent/pkg/util"
 )
-
-type DiskKeyType string
-
-const DiskKey DiskKeyType = "disk"
 
 var expectDiskFsTypes = []string{
 	"apfs", "ext4", "ext3", "ext2", "f2fs", "reiserfs", "jfs", "bcachefs", "btrfs",

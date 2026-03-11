@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"regexp"
 	"runtime"
@@ -128,7 +129,17 @@ func main() {
 			// 启动 Agent（携带可取消的上下文）
 			ctx, cancel := context.WithCancel(context.Background())
 			agentCancel = cancel
-			go run(ctx)
+			go func() {
+				// 保护 Agent 运行时的 panic，防止闪退
+				defer func() {
+					if r := recover(); r != nil {
+						statusLabel.SetText(fmt.Sprintf("Status: Crashed (%v)", r))
+						isAgentRunning = false
+						startStopBtn.SetText("Start Agent")
+					}
+				}()
+				run(ctx)
+			}()
 
 			isAgentRunning = true
 			startStopBtn.SetText("Stop Agent")
