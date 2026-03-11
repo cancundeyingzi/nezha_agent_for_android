@@ -1,0 +1,6 @@
+[
+    {
+        "merged": "com.nezhahq.agent.app-debug-45:/xml_network_security_config.xml.flat",
+        "source": "com.nezhahq.agent.app-main-47:/xml/network_security_config.xml"
+    }
+]
