@@ -3,6 +3,7 @@ package com.nezhahq.agent.service
 import android.app.*
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -35,7 +36,18 @@ class AgentService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        startForeground(1001, createNotification())
+        // Android Q (10) 及以上版本要求在 startForeground() 时指定 foregroundServiceType，
+        // 否则 Android 14+ 会直接抛出 ForegroundServiceTypeException 导致崩溃。
+        // Manifest 中已声明 foregroundServiceType="dataSync"，此处必须与之一致。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                1001,
+                createNotification(),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            )
+        } else {
+            startForeground(1001, createNotification())
+        }
         acquireWakeLock()
         
         Logger.i("Service started, configuring Grpc...")

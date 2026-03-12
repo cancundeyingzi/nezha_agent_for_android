@@ -4,8 +4,11 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -177,8 +180,42 @@ fun MainScreen() {
                     val p = port.toIntOrNull() ?: 5555
                     // 持久化加密存储密钥以及特权设置
                     ConfigStore.saveConfig(context, server, p, secret, useTls, uuid, rootMode)
+
+                    // ── 电池优化白名单检查，防止 Doze 模式导致后台断连 ─────────────
+                    // Android 6.0 (M) 以上才有 Doze 模式与电池优化白名单机制
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+                        val packageName = context.packageName
+                        if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
+                            // 应用未在白名单中：跳转系统设置，引导用户手动授权
+                            // ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 会弹出系统对话框
+                            val batteryIntent = Intent(
+                                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+                            ).apply {
+                                data = Uri.parse("package:$packageName")
+                            }
+                            try {
+                                context.startActivity(batteryIntent)
+                                Toast.makeText(
+                                    context,
+                                    "请在弹出的系统对话框中选择 '允许' 以保证后台保活",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            } catch (e: Exception) {
+                                // 少数定制 ROM 可能不支持此 Intent，回退到电池设置页
+                                try {
+                                    context.startActivity(
+                                        Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                                    )
+                                } catch (e2: Exception) {
+                                    // 兜底：忽略，不阻塞探针启动
+                                }
+                            }
+                        }
+                    }
+
+                    // ── 启动前台服务，适配 Android O 以上严格的前台服务启动规则 ───
                     val intent = Intent(context, AgentService::class.java)
-                    // 适配 Android O 以上严格的前台服务启动规则
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         context.startForegroundService(intent)
                     } else {
