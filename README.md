@@ -7,10 +7,9 @@ magisk地址  https://github.com/castula/magisk_nezha-agent
 <img width="1081" height="533" alt="image" src="https://github.com/user-attachments/assets/9e951994-b06b-40be-a452-7da0d73344e7" />
 root:
 <img width="1583" height="1105" alt="image" src="https://github.com/user-attachments/assets/dc2bfd95-f57a-45f2-8e28-ab81213e917a" />
-移动云手机极致版开机直装无rootadb开发者：
-<img width="2560" height="1919" alt="image" src="https://github.com/user-attachments/assets/d3067e0f-7e9e-421e-bdfc-dd4f3a49363a" />
+移动云手机极致版：
+<img width="854" height="576" alt="image" src="https://github.com/user-attachments/assets/e1c1088e-bef7-40aa-b00e-7ae6e9cc9fe5" />
 
-![-6168098780167737468_119](https://github.com/user-attachments/assets/7c9cfc4e-1ae0-4dd9-bbb5-b247ba0a5e5b)
 联通云智手机
 <img width="2560" height="1919" alt="image" src="https://github.com/user-attachments/assets/40492107-4487-41ca-a313-d652425adaef" />
 
