@@ -23,7 +23,7 @@ object ConfigStore {
         )
     }
 
-    fun saveConfig(context: Context, server: String, port: Int, secret: String, useTLS: Boolean = true, uuid: String = "", rootMode: Boolean = false) {
+    fun saveConfig(context: Context, server: String, port: Int, secret: String, useTLS: Boolean = true, uuid: String = "", rootMode: Boolean = false, enableKeepAliveAudio: Boolean = false, enableFloatWindow: Boolean = false) {
         getEncryptedPrefs(context).edit().apply {
             putString("server", server)
             putInt("port", port)
@@ -31,6 +31,8 @@ object ConfigStore {
             putBoolean("use_tls", useTLS)
             putString("uuid", uuid)
             putBoolean("root_mode", rootMode)
+            putBoolean("enable_keep_alive_audio", enableKeepAliveAudio)
+            putBoolean("enable_float_window", enableFloatWindow)
             apply()
         }
     }
@@ -41,6 +43,8 @@ object ConfigStore {
     fun getUuid(context: Context): String = getEncryptedPrefs(context).getString("uuid", "") ?: ""
     fun getUseTls(context: Context): Boolean = getEncryptedPrefs(context).getBoolean("use_tls", true)
     fun getRootMode(context: Context): Boolean = getEncryptedPrefs(context).getBoolean("root_mode", false)
+    fun getEnableKeepAliveAudio(context: Context): Boolean = getEncryptedPrefs(context).getBoolean("enable_keep_alive_audio", false)
+    fun getEnableFloatWindow(context: Context): Boolean = getEncryptedPrefs(context).getBoolean("enable_float_window", false)
     
     fun hasValidConfig(context: Context): Boolean {
         return getServer(context).isNotEmpty() && getSecret(context).isNotEmpty() && getUuid(context).isNotEmpty()

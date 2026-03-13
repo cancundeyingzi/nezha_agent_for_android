@@ -96,6 +96,7 @@
     <id name="view_tree_view_model_store_owner"/>
     <item name="wrapped_composition_tag" type="id"/>
     <integer name="status_bar_notification_info_maxnum">999</integer>
+    <string name="accessibility_desc">哪吒探针保活辅助服务：开启此服务可大幅提升探针在后台的存活率，防止系统杀后台。本服务不会读取或收集您的屏幕内容。</string>
     <string name="androidx_startup" translatable="false">androidx.startup</string>
     <string name="app_name">Nezha Agent</string>
     <string name="call_notification_answer_action">Answer</string>
@@ -238,23 +239,14 @@
         <attr format="reference" name="fontProviderCerts"/>
         
         <attr name="fontProviderFetchStrategy">
-            <!-- The blocking font fetch works as follows.
-              First, check the local cache, then if the requested font is not cached, request the
-              font from the provider and wait until it is finished.  You can change the length of
-              the timeout by modifying fontProviderFetchTimeout.  If the timeout happens, the
-              default typeface will be used instead. -->
+            
             <enum name="blocking" value="0"/>
-            <!-- The async font fetch works as follows.
-              First, check the local cache, then if the requeted font is not cached, trigger a
-              request the font and continue with layout inflation. Once the font fetch succeeds, the
-              target text view will be refreshed with the downloaded font data. The
-              fontProviderFetchTimeout will be ignored if async loading is specified. -->
+            
             <enum name="async" value="1"/>
         </attr>
         
         <attr format="integer" name="fontProviderFetchTimeout">
-            <!-- A special value for the timeout. In this case, the blocking font fetching will not
-              timeout and wait until a reply is received from the font provider. -->
+            
             <enum name="forever" value="-1"/>
         </attr>
         

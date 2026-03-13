@@ -21,6 +21,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -29,6 +32,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import com.nezhahq.agent.service.AgentService
 import com.nezhahq.agent.util.ConfigStore
 import rikka.shizuku.Shizuku
@@ -74,6 +78,7 @@ class MainActivity : ComponentActivity() {
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
 
         // 注册 Shizuku 权限回调监听器（必须在 Activity 生命周期内注册）
         Shizuku.addRequestPermissionResultListener(shizukuPermResultListener)
@@ -115,6 +120,191 @@ class MainActivity : ComponentActivity() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
+    shizukuRequestCode: Int = 19527,
+    onShizukuCallbackRegistered: ((callback: (Boolean) -> Unit) -> Unit)? = null
+) {
+    var selectedTab by remember { mutableIntStateOf(0) }
+
+    Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        bottomBar = {
+            NavigationBar(
+                windowInsets = WindowInsets.navigationBars
+            ) {
+                NavigationBarItem(
+                    selected = selectedTab == 0,
+                    onClick = { selectedTab = 0 },
+                    icon = { Icon(Icons.Default.Home, contentDescription = "Home") },
+                    label = { Text("配置") }
+                )
+                NavigationBarItem(
+                    selected = selectedTab == 1,
+                    onClick = { selectedTab = 1 },
+                    icon = { Icon(Icons.Default.Build, contentDescription = "Tools") },
+                    label = { Text("工具") }
+                )
+            }
+        },
+        contentWindowInsets = WindowInsets.systemBars
+    ) { innerPadding ->
+        Box(modifier = Modifier
+            .fillMaxSize()
+            .padding(innerPadding)
+        ) {
+            // Render both screens to keep state and avoid heavy recomposition when switching
+            if (selectedTab == 0) {
+                ConfigScreenContent(shizukuRequestCode, onShizukuCallbackRegistered)
+            }
+            if (selectedTab == 1) {
+                ToolsScreenContent()
+            }
+        }
+    }
+}
+
+@Composable
+fun ToolsScreenContent() {
+    val context = LocalContext.current
+    var enableKeepAliveAudio by remember { mutableStateOf(ConfigStore.getEnableKeepAliveAudio(context)) }
+    var enableFloatWindow by remember { mutableStateOf(ConfigStore.getEnableFloatWindow(context)) }
+
+    val scrollState = rememberScrollState()
+
+    // 辅助保存设置的函数
+    val saveCurrentSettings = { audio: Boolean, floatWin: Boolean ->
+        ConfigStore.saveConfig(
+            context,
+            ConfigStore.getServer(context),
+            ConfigStore.getPort(context),
+            ConfigStore.getSecret(context),
+            ConfigStore.getUseTls(context),
+            ConfigStore.getUuid(context),
+            ConfigStore.getRootMode(context),
+            audio,
+            floatWin
+        )
+        Toast.makeText(context, "配置已保存，请在主页停止并重新启动探针以生效", Toast.LENGTH_LONG).show()
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+            .verticalScroll(scrollState),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Text("实用工具与高级设置", style = MaterialTheme.typography.headlineMedium)
+
+        Card(shape = RoundedCornerShape(12.dp)) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("系统权限快捷跳转", style = MaterialTheme.typography.titleMedium)
+                
+                Button(
+                    onClick = {
+                        try {
+                            context.startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS).apply {
+                                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                            })
+                        } catch (e: Exception) {
+                            Toast.makeText(context, "无法打开开发者选项", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("打开开发者选项")
+                }
+                
+                Button(
+                    onClick = {
+                        try {
+                            context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).apply {
+                                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                            })
+                        } catch (e: Exception) {
+                            Toast.makeText(context, "无法打开使用情况访问权限", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("打开使用情况访问权限")
+                }
+
+                Button(
+                    onClick = {
+                        try {
+                            context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                            })
+                        } catch (e: Exception) {
+                            Toast.makeText(context, "无法打开无障碍权限", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("打开无障碍权限")
+                }
+
+                Button(
+                    onClick = {
+                        try {
+                            context.startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION).apply {
+                                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                data = Uri.parse("package:${context.packageName}")
+                            })
+                        } catch (e: Exception) {
+                            Toast.makeText(context, "无法打开悬浮窗权限", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("打开悬浮窗权限")
+                }
+            }
+        }
+
+        Card(shape = RoundedCornerShape(12.dp)) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("保活增强", style = MaterialTheme.typography.titleMedium)
+                Row {
+                    Switch(
+                        checked = enableKeepAliveAudio,
+                        onCheckedChange = { newValue ->
+                            enableKeepAliveAudio = newValue
+                            saveCurrentSettings(newValue, enableFloatWindow)
+                        }
+                    )
+                    Column(modifier = Modifier.padding(start = 12.dp)) {
+                        Text("允许后台播放微弱音频")
+                        Text(
+                            "发送极其微弱的次声波骗过部分系统的静音检测，防止杀后台（需重启服务生效）",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+                Row(modifier = Modifier.padding(top = 8.dp)) {
+                    Switch(
+                        checked = enableFloatWindow,
+                        onCheckedChange = { newValue ->
+                            enableFloatWindow = newValue
+                            saveCurrentSettings(enableKeepAliveAudio, newValue)
+                        }
+                    )
+                    Column(modifier = Modifier.padding(start = 12.dp)) {
+                        Text("开启像素级透明悬浮窗")
+                        Text(
+                            "创建一个1x1不可见的悬浮窗来拉高进程优先级（需授予悬浮窗权限并重启服务生效）",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ConfigScreenContent(
     shizukuRequestCode: Int = 19527,
     onShizukuCallbackRegistered: ((callback: (Boolean) -> Unit) -> Unit)? = null
 ) {
@@ -341,7 +531,8 @@ fun MainScreen(
                     }
                     
                     // 持久化加密存储密钥以及特权设置
-                    ConfigStore.saveConfig(context, server, p, secret, useTls, uuid, rootMode)
+                    val currentAudioSetting = ConfigStore.getEnableKeepAliveAudio(context)
+                    ConfigStore.saveConfig(context, server, p, secret, useTls, uuid, rootMode, currentAudioSetting)
 
                     // ── 将"实际启动服务"封装为 lambda，待权限确认后安全调用 ──────────
                     // 【修复：通知权限异步时序陷阱】
@@ -444,7 +635,7 @@ fun MainScreen(
                         clipboard.setPrimaryClip(clip)
                         Toast.makeText(context, "日志已复制到剪贴板", Toast.LENGTH_SHORT).show()
                     }) {
-                        Text("一键复制日志")
+                        Text("复制日志")
                     }
                 }
                 Box(

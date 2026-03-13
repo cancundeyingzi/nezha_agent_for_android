@@ -20,6 +20,8 @@ import com.nezhahq.agent.grpc.GrpcManager
 import com.nezhahq.agent.util.ConfigStore
 import com.nezhahq.agent.util.Logger
 import com.nezhahq.agent.util.RootShell
+import com.nezhahq.agent.util.KeepAliveAudioPlayer
+import com.nezhahq.agent.util.FloatWindowManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import proto.Nezha.Receipt
@@ -32,11 +34,20 @@ class AgentService : Service() {
     
     private var wakeLock: PowerManager.WakeLock? = null
     private val stateCollector by lazy { SystemStateCollector(this) }
+    private val audioPlayer = KeepAliveAudioPlayer()
     
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        if (ConfigStore.getEnableKeepAliveAudio(this)) {
+            Logger.i("AgentService: 启用无声音频保活机制")
+            audioPlayer.start()
+        }
+        if (ConfigStore.getEnableFloatWindow(this)) {
+            Logger.i("AgentService: 启用悬浮窗保活机制")
+            FloatWindowManager.show(this)
+        }
         // ── 前台服务 startForeground 类型适配 ─────────────────────────────────
         // Android Q (10, API 29)+ 要求在调用时传入与 Manifest 声明一致的 serviceType。
         // Android 14 (API 34)+ 对 dataSync 的审查更严格（需真实数据同步活动），
@@ -163,6 +174,8 @@ class AgentService : Service() {
     override fun onDestroy() {
         Logger.i("Service is being destroyed globally by system or user intent.")
         super.onDestroy()
+        audioPlayer.stop()
+        FloatWindowManager.hide(this)
         job.cancel()
         wakeLock?.let { if (it.isHeld) it.release() }
         GrpcManager.shutdown()
