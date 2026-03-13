@@ -12,7 +12,8 @@ root:
 
 ![-6168098780167737468_119](https://github.com/user-attachments/assets/7c9cfc4e-1ae0-4dd9-bbb5-b247ba0a5e5b)
 联通云智手机
-![-6168098780167737476_119](https://github.com/user-attachments/assets/c8fabea2-bd60-42b0-982b-c6ff857abb19)
+<img width="2560" height="1919" alt="image" src="https://github.com/user-attachments/assets/40492107-4487-41ca-a313-d652425adaef" />
+
 
 
 
