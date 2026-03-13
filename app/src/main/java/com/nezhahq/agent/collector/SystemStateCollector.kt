@@ -168,7 +168,9 @@ class SystemStateCollector(private val context: Context) {
     /**
      * 读取全系统的收发流量。
      * - Root/Shizuku 模式：通过 `cat /proc/net/dev` 解析全网卡流量，规避 Android 11+ 对 TrafficStats 的限制。
-     * - 普通模式：使用 `TrafficStats`，若被系统拦截或不支持则回退为 0。
+     * - 普通模式（Android 12+）：遍历 NetworkInterface 并调用 TrafficStats.getRxBytes(iface.name)。
+     * - 普通模式（Android 6+ 降级）：尝试使用 NetworkStatsManager 查询设备总计。
+     * - 普通模式（最低兜底）：使用 TrafficStats.getTotalRxBytes()，若被系统拦截或不支持则回退为 0。
      */
     private fun readNetworkTrafficBytes(isRootMode: Boolean): Pair<Long, Long> {
         var rx = -1L
@@ -206,7 +208,76 @@ class SystemStateCollector(private val context: Context) {
             }
         }
 
-        // 降级使用 TrafficStats（可能返回 UNSUPPORTED 即 -1）
+        // 降级策略 1：使用 Android 12 (API 31+) 提供的按网卡获取流量的方法
+        if ((rx < 0L || tx < 0L) && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            try {
+                val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
+                if (interfaces != null) {
+                    var tempRx = 0L
+                    var tempTx = 0L
+                    var hasData = false
+                    for (iface in interfaces) {
+                        if (!iface.isLoopback) {
+                            val r = TrafficStats.getRxBytes(iface.name)
+                            val t = TrafficStats.getTxBytes(iface.name)
+                            if (r != TrafficStats.UNSUPPORTED.toLong() && r >= 0) {
+                                tempRx += r
+                                hasData = true
+                            }
+                            if (t != TrafficStats.UNSUPPORTED.toLong() && t >= 0) {
+                                tempTx += t
+                                hasData = true
+                            }
+                        }
+                    }
+                    if (hasData) {
+                        rx = tempRx
+                        tx = tempTx
+                    }
+                }
+            } catch (e: Exception) {
+                Logger.e("StateCollector: API 31+ TrafficStats 按网卡获取失败", e)
+            }
+        }
+
+        // 降级策略 2：使用 Android 6 (API 23+) 的 NetworkStatsManager 获取设备级流量
+        if ((rx < 0L || tx < 0L) && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+            try {
+                val nsm = context.getSystemService(Context.NETWORK_STATS_SERVICE) as? android.app.usage.NetworkStatsManager
+                if (nsm != null) {
+                    var tempRx = 0L
+                    var tempTx = 0L
+                    var hasData = false
+
+                    val queryStats = { transportType: Int ->
+                        try {
+                            val bucket = nsm.querySummaryForDevice(transportType, null, 0, System.currentTimeMillis())
+                            if (bucket != null) {
+                                tempRx += bucket.rxBytes
+                                tempTx += bucket.txBytes
+                                if (bucket.rxBytes > 0 || bucket.txBytes > 0) hasData = true
+                            }
+                        } catch (e: Exception) {
+                            // 忽略缺乏权限 (SecurityException) 或服务不可用等异常
+                        }
+                    }
+
+                    // NetworkStatsManager 在旧版 API 中依赖 ConnectivityManager 的 TYPE 常量
+                    queryStats(android.net.ConnectivityManager.TYPE_WIFI)
+                    queryStats(android.net.ConnectivityManager.TYPE_MOBILE)
+                    queryStats(android.net.ConnectivityManager.TYPE_ETHERNET)
+
+                    if (hasData) {
+                        rx = tempRx
+                        tx = tempTx
+                    }
+                }
+            } catch (e: Exception) {
+                Logger.e("StateCollector: NetworkStatsManager 获取失败", e)
+            }
+        }
+
+        // 降级策略 3：回退到最基础的 TrafficStats 总计（API 8+）
         if (rx < 0L || tx < 0L) {
             val tsRx = TrafficStats.getTotalRxBytes()
             val tsTx = TrafficStats.getTotalTxBytes()

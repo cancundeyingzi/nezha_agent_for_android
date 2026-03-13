@@ -27,10 +27,12 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import com.nezhahq.agent.service.AgentService
@@ -151,11 +153,23 @@ fun MainScreen(
             .fillMaxSize()
             .padding(innerPadding)
         ) {
-            // Render both screens to keep state and avoid heavy recomposition when switching
-            if (selectedTab == 0) {
+            // 两个页面始终保留在 Compose 树中，切换时 remember 状态不会被销毁。
+            // 非活跃页面通过 alpha(0f) 设为完全透明（仅影响绘制层，不触发重新布局）；
+            // 活跃页面通过 zIndex(1f) 提升到顶层，自然遮挡底层并拦截触摸事件。
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .zIndex(if (selectedTab == 0) 1f else 0f)
+                    .alpha(if (selectedTab == 0) 1f else 0f)
+            ) {
                 ConfigScreenContent(shizukuRequestCode, onShizukuCallbackRegistered)
             }
-            if (selectedTab == 1) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .zIndex(if (selectedTab == 1) 1f else 0f)
+                    .alpha(if (selectedTab == 1) 1f else 0f)
+            ) {
                 ToolsScreenContent()
             }
         }

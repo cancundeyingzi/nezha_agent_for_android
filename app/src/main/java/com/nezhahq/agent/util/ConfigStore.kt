@@ -9,18 +9,33 @@ object ConfigStore {
 
     private const val PREFS_FILE = "nezha_secure_prefs"
 
-    private fun getEncryptedPrefs(context: Context): SharedPreferences {
-        val masterKey = MasterKey.Builder(context)
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build()
+    @Volatile
+    private var prefsInstance: SharedPreferences? = null
 
-        return EncryptedSharedPreferences.create(
-            context,
-            PREFS_FILE,
-            masterKey,
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-        )
+    /**
+     * 获取加密的 SharedPreferences 实例。
+     * 采用双重检查锁（Double-Checked Locking）单例模式，避免由于反复初始化
+     * EncryptedSharedPreferences 和读写 KeyStore 产生严重的性能开销和主线程卡顿。
+     * [Security Audit] 使用了 applicationContext 防内存溢出，同时利用 AES256_GCM 保证数据存储安全。
+     */
+    private fun getEncryptedPrefs(context: Context): SharedPreferences {
+        return prefsInstance ?: synchronized(this) {
+            prefsInstance ?: run {
+                val masterKey = MasterKey.Builder(context.applicationContext)
+                    .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                    .build()
+
+                val prefs = EncryptedSharedPreferences.create(
+                    context.applicationContext,
+                    PREFS_FILE,
+                    masterKey,
+                    EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                    EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+                )
+                prefsInstance = prefs
+                prefs
+            }
+        }
     }
 
     fun saveConfig(context: Context, server: String, port: Int, secret: String, useTLS: Boolean = true, uuid: String = "", rootMode: Boolean = false, enableKeepAliveAudio: Boolean = false, enableFloatWindow: Boolean = false) {
