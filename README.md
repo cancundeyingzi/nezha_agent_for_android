@@ -1,5 +1,5 @@
 # Nezha Agent For Android
-### 代码100%由AI生成 
+### 代码99%由AI生成 
 magisk地址  https://github.com/castula/magisk_nezha-agent
       
 
