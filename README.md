@@ -1,8 +1,10 @@
 # Nezha Agent For Android
 ### 代码99%由AI生成 
-magisk地址  https://github.com/castula/magisk_nezha-agent
+他人magisk地址  https://github.com/castula/magisk_nezha-agent
       
-
+尽量保持原有功能,额外新增功能
+0高强度流氓后台保活.(谁能告诉我拼多多是怎么保活的？
+1短信读取,我有时候要读一下验证码.
 
 root:   
 <img alt="image" src="https://raw.githubusercontent.com/cancundeyingzi/nezha_agent_apk/refs/heads/main/.github/ec549e16-576d-443a-b590-71a6ef1341fd.png" />
