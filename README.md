@@ -13,8 +13,7 @@ root:
 <img width="2560" height="1919" alt="image" src="https://github.com/user-attachments/assets/40492107-4487-41ca-a313-d652425adaef" />
 
 红米k50:   
-<img alt="image" src="https://github.com/cancundeyingzi/nezha_agent_apk/blob/main/.github/Screenshot_2026-03-14-10-17-18-35_37e81299c436ed5.png?raw=true
-" />
+<img alt="image" src="https://raw.githubusercontent.com/cancundeyingzi/nezha_agent_apk/refs/heads/main/.github/Screenshot_2026-03-14-10-17-18-35_37e81299c436ed5.png" />
 
 
 后续(也是ai)
