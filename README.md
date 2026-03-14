@@ -5,7 +5,7 @@ magisk地址  https://github.com/castula/magisk_nezha-agent
 
 
 root:   
-<img width="1583" height="1105" alt="image" src="https://github.com/user-attachments/assets/dc2bfd95-f57a-45f2-8e28-ab81213e917a" />
+<img alt="image" src="https://raw.githubusercontent.com/cancundeyingzi/nezha_agent_apk/refs/heads/main/.github/0bea6b81-56db-47e0-9312-f11ba19d3510.png" />
 移动云手机极致版：  
 <img width="854" height="576" alt="image" src="https://github.com/user-attachments/assets/e1c1088e-bef7-40aa-b00e-7ae6e9cc9fe5" />
 
