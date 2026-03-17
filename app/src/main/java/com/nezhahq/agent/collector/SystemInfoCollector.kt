@@ -70,6 +70,7 @@ object SystemInfoCollector {
             .setPlatform("Android")
             .setPlatformVersion(Build.VERSION.RELEASE)
             .addAllCpu(cpuList)
+            .addAllGpu(GpuCollector.getGpuNames())
             .setMemTotal(memInfo.totalMem)
             .setDiskTotal(diskTotal)
             .setSwapTotal(swapTotal)

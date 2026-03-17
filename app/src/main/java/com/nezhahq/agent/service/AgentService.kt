@@ -15,6 +15,7 @@ import androidx.core.app.NotificationCompat
 import com.nezhahq.agent.collector.GeoIpCollector
 import com.nezhahq.agent.collector.SystemInfoCollector
 import com.nezhahq.agent.collector.SystemStateCollector
+import com.nezhahq.agent.executor.NatManager
 import com.nezhahq.agent.executor.TaskExecutor
 import com.nezhahq.agent.executor.TerminalManager
 import com.nezhahq.agent.grpc.GrpcConnectionState
@@ -152,10 +153,27 @@ class AgentService : Service() {
                                                 val terminal = TerminalManager(
                                                     this@AgentService, stub, streamId
                                                 )
-                                                terminal.run(this)
+                                                terminal.run()
                                             } catch (e: Exception) {
                                                 if (e !is CancellationException) {
                                                     Logger.e("终端任务执行失败", e)
+                                                }
+                                            }
+                                        }
+                                        9L -> {
+                                            // ── TaskTypeNAT（内网穿透/反向代理）──
+                                            // Dashboard 请求建立 NAT 通道，解析 StreamID 和 Host，
+                                            // 通过 IOStream 双向流将远端请求转发到本地目标服务
+                                            try {
+                                                val json = org.json.JSONObject(task.data)
+                                                val streamId = json.getString("StreamID")
+                                                val natHost = json.getString("Host")
+                                                Logger.i("收到 NAT 内网穿透任务 (TaskID=${task.id}, StreamID=$streamId, Host=$natHost)")
+                                                val natManager = NatManager(stub, streamId, natHost)
+                                                natManager.run()
+                                            } catch (e: Exception) {
+                                                if (e !is CancellationException) {
+                                                    Logger.e("NAT 内网穿透任务执行失败", e)
                                                 }
                                             }
                                         }
@@ -218,6 +236,8 @@ class AgentService : Service() {
         job.cancel()
         wakeLock?.let { if (it.isHeld) it.release() }
         GrpcManager.shutdown()
+        // 清理 GPU 采集器缓存，确保服务重启时重新探测 sysfs 路径
+        com.nezhahq.agent.collector.GpuCollector.resetCache()
         // 关闭持久化 Root Shell 会话，释放后台 su 进程资源，防止进程泄漏
         RootShell.shutdown()
         Logger.i("RootShell persistent session closed.")

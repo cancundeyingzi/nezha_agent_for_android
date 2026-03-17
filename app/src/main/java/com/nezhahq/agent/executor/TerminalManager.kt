@@ -60,52 +60,62 @@ class TerminalManager(
      * 此方法会阻塞直到终端会话结束（用户关闭终端或连接断开）。
      * 应在独立协程中调用。
      */
-    suspend fun run(scope: CoroutineScope) {
+    suspend fun run() {
         try {
-            // 1. 启动 sh 子进程
-            val pb = ProcessBuilder("/system/bin/sh")
-            pb.redirectErrorStream(true)
-            process = pb.start()
-            shellInput = process!!.outputStream
-            Logger.i("TerminalManager: Shell 子进程已启动（StreamID=$streamId）")
+            coroutineScope {
+                // 1. 启动 sh 子进程
+                val pb = ProcessBuilder("/system/bin/sh")
+                pb.redirectErrorStream(true)
+                process = pb.start()
+                shellInput = process!!.outputStream
+                Logger.i("TerminalManager: Shell 子进程已启动（StreamID=$streamId）")
 
-            // 2. 启动 stdout 读取协程
-            scope.launch(Dispatchers.IO) { readLoop(process!!.inputStream) }
-
-            // 3. 发送 StreamID 魔术头（协议握手）
-            val header = STREAM_MAGIC + streamId.toByteArray(Charsets.UTF_8)
-            val headerMsg = Nezha.IOStreamData.newBuilder()
-                .setData(ByteString.copyFrom(header))
-                .build()
-            outputChannel.send(headerMsg)
-
-            // 4. 发送欢迎横幅
-            sendOutput("\r\n========== Nezha Agent Terminal ==========\r\n")
-            sendOutput("  输入 @agent help 查看虚拟指令\r\n")
-            sendOutput("==========================================\r\n\r\n")
-            sendOutput(PROMPT)
-
-            // 5. 启动心跳协程
-            scope.launch { keepAliveLoop() }
-
-            // 6. 建立 IOStream 双向流并处理输入
-            stub.iOStream(outputFlow()).collect { ioData ->
-                val bytes = ioData.data.toByteArray()
-                if (bytes.isEmpty()) return@collect // 心跳空包，忽略
-
-                when (bytes[0].toInt() and 0xFF) {
-                    0x00 -> { // 终端输入数据
-                        if (bytes.size > 1) {
-                            handleInput(bytes.copyOfRange(1, bytes.size))
-                        }
-                    }
-                    0x01 -> { // 窗口大小调整（当前无 PTY，忽略）
-                        // 未来如果实现 PTY 可在此调整窗口大小
-                    }
-                    else -> {
-                        // 未知类型，忽略
+                // 2. 启动 stdout 读取协程
+                launch(Dispatchers.IO) {
+                    try {
+                        readLoop(process!!.inputStream)
+                    } finally {
+                        this@coroutineScope.cancel()
                     }
                 }
+
+                // 3. 发送 StreamID 魔术头（协议握手）
+                val header = STREAM_MAGIC + streamId.toByteArray(Charsets.UTF_8)
+                val headerMsg = Nezha.IOStreamData.newBuilder()
+                    .setData(ByteString.copyFrom(header))
+                    .build()
+                outputChannel.send(headerMsg)
+
+                // 4. 发送欢迎横幅
+                sendOutput("\r\n========== Nezha Agent Terminal ==========\r\n")
+                sendOutput("  输入 @agent help 查看虚拟指令\r\n")
+                sendOutput("==========================================\r\n\r\n")
+                sendOutput(PROMPT)
+
+                // 5. 启动心跳协程
+                launch { keepAliveLoop() }
+
+                // 6. 建立 IOStream 双向流并处理输入
+                stub.iOStream(outputFlow()).collect { ioData ->
+                    val bytes = ioData.data.toByteArray()
+                    if (bytes.isEmpty()) return@collect // 心跳空包，忽略
+
+                    when (bytes[0].toInt() and 0xFF) {
+                        0x00 -> { // 终端输入数据
+                            if (bytes.size > 1) {
+                                handleInput(bytes.copyOfRange(1, bytes.size))
+                            }
+                        }
+                        0x01 -> { // 窗口大小调整（当前无 PTY，忽略）
+                            // 未来如果实现 PTY 可在此调整窗口大小
+                        }
+                        else -> {
+                            // 未知类型，忽略
+                        }
+                    }
+                }
+                
+                this@coroutineScope.cancel()
             }
         } catch (e: Exception) {
             if (e !is CancellationException) {

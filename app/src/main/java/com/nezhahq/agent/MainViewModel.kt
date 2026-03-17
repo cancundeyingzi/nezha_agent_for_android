@@ -375,6 +375,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         appendLine("▸ UDP 连接: ${state.udpConnCount}")
                         appendLine("▸ 进程数: ${state.processCount}")
                         appendLine("▸ 温度: ${state.temperaturesList.firstOrNull()?.let { "${it.name} ${it.temperature}°C" } ?: "N/A"}")
+                        // GPU 信息
+                        val gpuName = com.nezhahq.agent.collector.GpuCollector.getGpuNames().firstOrNull()
+                        appendLine("▸ GPU: ${gpuName ?: "N/A"}")
+                        val gpuUsages = state.gpuList
+                        appendLine("▸ GPU 使用率: ${
+                            if (gpuUsages.isNotEmpty()) "${"%.1f".format(gpuUsages.first())}%"
+                            else "N/A（需 Root/Shizuku）"
+                        }")
                         appendLine()
                         appendLine("═══ 权限状态 ═══")
                         appendLine("▸ Shell 会话: ${RootShell.getSessionType() ?: "无（普通模式）"}")
