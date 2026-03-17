@@ -10,6 +10,8 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import android.widget.Toast
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -257,17 +259,30 @@ fun ToolsScreenContent(vm: MainViewModel) {
     val context = LocalContext.current
     val scrollState = rememberScrollState()
 
-    // ── SMS 权限状态检测 ──
-    var smsPermGranted by remember {
-        mutableStateOf(
-            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS)
-                    == PackageManager.PERMISSION_GRANTED
-        )
+    // ── 权限状态列表（响应式，自动驱动 UI 重组）──
+    var permissionList by remember {
+        mutableStateOf(com.nezhahq.agent.util.PermissionChecker.getAllPermissionStatus(context))
     }
+
+    // ── 生命周期感知：从系统设置页返回时自动刷新权限状态 ──
+    @Suppress("DEPRECATION")
+    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                permissionList = com.nezhahq.agent.util.PermissionChecker.getAllPermissionStatus(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // ── SMS 运行时权限请求器（唯一需要弹窗授权的权限）──
     val smsPermLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
-        smsPermGranted = granted
+        // 刷新全部权限状态
+        permissionList = com.nezhahq.agent.util.PermissionChecker.getAllPermissionStatus(context)
         if (granted) {
             Toast.makeText(context, "短信权限已授予，可在终端中使用 @agent sms", Toast.LENGTH_SHORT).show()
         } else {
@@ -284,92 +299,91 @@ fun ToolsScreenContent(vm: MainViewModel) {
     ) {
         Text("实用工具与高级设置", style = MaterialTheme.typography.headlineMedium)
 
-        // ── 终端虚拟指令权限 ──
+        // ══════════════════════════════════════════════════════════════════
+        // 权限状态总览卡片
+        // ══════════════════════════════════════════════════════════════════
         Card(shape = RoundedCornerShape(12.dp)) {
-            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("终端虚拟指令", style = MaterialTheme.typography.titleMedium)
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text("权限状态总览", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "在 Dashboard 终端中输入 @agent help 查看可用指令。" +
-                            "使用 @agent sms 需要先授予短信权限。",
-                    style = MaterialTheme.typography.bodySmall
+                    "以下列出探针运行所需的各项权限状态。未授予的权限可能导致部分功能不可用。",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(bottom = 8.dp)
                 )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = if (smsPermGranted) "✅ 短信权限已授予" else "⚠️ 短信权限未授予",
-                        color = if (smsPermGranted) Color(0xFF4CAF50) else Color(0xFFFF9800),
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.weight(1f)
+
+                permissionList.forEach { item ->
+                    PermissionStatusRow(
+                        item = item,
+                        onAction = {
+                            // 根据权限类型执行不同的授权动作
+                            when (item.key) {
+                                "sms" -> smsPermLauncher.launch(Manifest.permission.READ_SMS)
+                                "usage_stats" -> {
+                                    // 优先尝试直接跳转到本应用的使用情况详情页
+                                    // 部分设备/Android 版本支持 package data URI 直达
+                                    val specificIntent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).apply {
+                                        data = Uri.parse("package:${context.packageName}")
+                                    }
+                                    if (!safeStartActivityWithFallback(
+                                            context,
+                                            specificIntent,
+                                            Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
+                                        )) {
+                                        Toast.makeText(context, "无法打开使用情况访问设置", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                                "accessibility" -> safeStartActivity(context, Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                                "overlay" -> safeStartActivity(context, Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION).apply {
+                                    data = Uri.parse("package:${context.packageName}")
+                                })
+                                "battery" -> {
+                                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                                        safeStartActivity(context, Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                                            data = Uri.parse("package:${context.packageName}")
+                                        })
+                                    }
+                                }
+                                "notification" -> {
+                                    // 使用 ACTION_APP_NOTIFICATION_SETTINGS 直接跳转到本应用通知设置详情页
+                                    safeStartActivity(context, Intent().apply {
+                                        action = Settings.ACTION_APP_NOTIFICATION_SETTINGS
+                                        putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                                    })
+                                }
+                                "auto_start" -> {
+                                    // 开机自启动是应用内开关，直接切换
+                                    vm.toggleAutoStart(!item.granted)
+                                    permissionList = com.nezhahq.agent.util.PermissionChecker.getAllPermissionStatus(context)
+                                }
+                            }
+                        }
                     )
-                    if (!smsPermGranted) {
-                        Button(
-                            onClick = { smsPermLauncher.launch(Manifest.permission.READ_SMS) }
-                        ) { Text("授予权限") }
-                    }
                 }
             }
         }
 
-        // 系统权限快捷跳转
+        // ══════════════════════════════════════════════════════════════════
+        // 系统设置快捷入口（保留开发者选项等不属于权限检测的跳转）
+        // ══════════════════════════════════════════════════════════════════
         Card(shape = RoundedCornerShape(12.dp)) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("系统权限快捷跳转", style = MaterialTheme.typography.titleMedium)
+                Text("系统设置快捷入口", style = MaterialTheme.typography.titleMedium)
 
                 Button(
                     onClick = {
-                        try {
-                            context.startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS).apply {
-                                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                            })
-                        } catch (e: Exception) {
-                            Toast.makeText(context, "无法打开开发者选项", Toast.LENGTH_SHORT).show()
-                        }
+                        safeStartActivity(context, Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("打开开发者选项") }
-
-                Button(
-                    onClick = {
-                        try {
-                            context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).apply {
-                                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                            })
-                        } catch (e: Exception) {
-                            Toast.makeText(context, "无法打开使用情况访问权限", Toast.LENGTH_SHORT).show()
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("打开使用情况访问权限") }
-
-                Button(
-                    onClick = {
-                        try {
-                            context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
-                                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                            })
-                        } catch (e: Exception) {
-                            Toast.makeText(context, "无法打开无障碍权限", Toast.LENGTH_SHORT).show()
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("打开无障碍权限") }
-
-                Button(
-                    onClick = {
-                        try {
-                            context.startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION).apply {
-                                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                                data = Uri.parse("package:${context.packageName}")
-                            })
-                        } catch (e: Exception) {
-                            Toast.makeText(context, "无法打开悬浮窗权限", Toast.LENGTH_SHORT).show()
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("打开悬浮窗权限") }
             }
         }
 
+        // ══════════════════════════════════════════════════════════════════
         // 保活增强
+        // ══════════════════════════════════════════════════════════════════
         Card(shape = RoundedCornerShape(12.dp)) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("保活增强", style = MaterialTheme.typography.titleMedium)
@@ -405,7 +419,117 @@ fun ToolsScreenContent(vm: MainViewModel) {
                         )
                     }
                 }
+                Row(modifier = Modifier.padding(top = 8.dp)) {
+                    Switch(
+                        checked = vm.enableAutoStart,
+                        onCheckedChange = { newValue ->
+                            vm.toggleAutoStart(newValue)
+                        }
+                    )
+                    Column(modifier = Modifier.padding(start = 12.dp)) {
+                        Text("开机自启动")
+                        Text(
+                            "设备重启后自动恢复探针后台服务，建议开启以防失联",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
             }
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 权限状态行组件
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * 单行权限状态展示组件。
+ *
+ * 显示权限名称、授权状态图标（✅ / ⚠️），以及未授权时的「去授权」按钮。
+ * 保持紧凑布局，与整体工具页风格一致。
+ */
+@Composable
+private fun PermissionStatusRow(
+    item: com.nezhahq.agent.util.PermissionChecker.PermissionItem,
+    onAction: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(
+                if (item.granted) Color(0xFF4CAF50).copy(alpha = 0.08f)
+                else Color(0xFFFF9800).copy(alpha = 0.08f)
+            )
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = if (item.granted) "✅" else "⚠️",
+            fontSize = 14.sp
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = item.name,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.weight(1f)
+        )
+        if (!item.granted) {
+            TextButton(
+                onClick = onAction,
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+            ) {
+                Text(
+                    text = if (item.key == "auto_start") "启用" else "去授权",
+                    fontSize = 12.sp
+                )
+            }
+        } else {
+            Text(
+                text = "已授予",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFF4CAF50)
+            )
+        }
+    }
+}
+
+/**
+ * 安全启动系统设置 Activity 的辅助方法。
+ * 自动添加 FLAG_ACTIVITY_NEW_TASK 标志，并 try-catch 兜底防止崩溃。
+ */
+private fun safeStartActivity(context: Context, intent: Intent) {
+    try {
+        intent.flags = intent.flags or Intent.FLAG_ACTIVITY_NEW_TASK
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        Toast.makeText(context, "无法打开系统设置", Toast.LENGTH_SHORT).show()
+    }
+}
+
+/**
+ * 带降级的安全跳转：优先尝试 [primary]（通常是应用级详情页），
+ * 若设备不支持则自动降级到 [fallback]（通常是上级列表页）。
+ *
+ * @return true 表示至少有一个 Intent 成功启动
+ */
+private fun safeStartActivityWithFallback(
+    context: Context,
+    primary: Intent,
+    fallback: Intent
+): Boolean {
+    return try {
+        primary.flags = primary.flags or Intent.FLAG_ACTIVITY_NEW_TASK
+        context.startActivity(primary)
+        true
+    } catch (_: Exception) {
+        try {
+            fallback.flags = fallback.flags or Intent.FLAG_ACTIVITY_NEW_TASK
+            context.startActivity(fallback)
+            true
+        } catch (_: Exception) {
+            false
         }
     }
 }
@@ -451,6 +575,25 @@ fun ConfigScreenContent(
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         Text("哪吒探针", style = MaterialTheme.typography.headlineMedium)
+
+        // ── 首次启动自启动授权弹窗 ──
+        if (vm.showAutoStartPrompt) {
+            AlertDialog(
+                onDismissRequest = { /* 强迫用户做出选择，不响应点击外部取消 */ },
+                title = { Text("启用开机自启动？") },
+                text = { Text("为了保证设备重启后探针不会离线，强烈建议您开启「开机自启动」功能。您稍后随时可以在「工具」页面修改此选项。") },
+                confirmButton = {
+                    Button(onClick = { vm.onAutoStartPromptResult(true) }) {
+                        Text("启用")
+                    }
+                },
+                dismissButton = {
+                    OutlinedButton(onClick = { vm.onAutoStartPromptResult(false) }) {
+                        Text("暂不启用")
+                    }
+                }
+            )
+        }
 
         // ── gRPC 连接状态指示器 ──
         GrpcStatusIndicator(grpcState)

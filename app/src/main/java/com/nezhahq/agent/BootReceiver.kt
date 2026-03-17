@@ -40,6 +40,12 @@ class BootReceiver : BroadcastReceiver() {
             return
         }
 
+        // 若用户未启用自启动功能，跳过
+        if (!ConfigStore.getEnableAutoStart(context)) {
+            Logger.i("BootReceiver: 收到 $action，但用户未启用自启动开关，跳过自动启动。")
+            return
+        }
+
         Logger.i("BootReceiver: 收到 $action，正在自动恢复探针后台服务...")
         val serviceIntent = Intent(context, AgentService::class.java)
         // ContextCompat.startForegroundService 会在 Android O+ 自动选用正确的启动方式

@@ -60,6 +60,17 @@ object ConfigStore {
     fun getRootMode(context: Context): Boolean = getEncryptedPrefs(context).getBoolean("root_mode", false)
     fun getEnableKeepAliveAudio(context: Context): Boolean = getEncryptedPrefs(context).getBoolean("enable_keep_alive_audio", false)
     fun getEnableFloatWindow(context: Context): Boolean = getEncryptedPrefs(context).getBoolean("enable_float_window", false)
+    fun getEnableAutoStart(context: Context): Boolean = getEncryptedPrefs(context).getBoolean("enable_auto_start", false)
+    fun getHasShownAutoStartPrompt(context: Context): Boolean = getEncryptedPrefs(context).getBoolean("has_shown_auto_start_prompt", false)
+
+    fun setEnableAutoStart(context: Context, enable: Boolean) {
+        getEncryptedPrefs(context).edit().putBoolean("enable_auto_start", enable).apply()
+    }
+    
+    fun setHasShownAutoStartPrompt(context: Context, shown: Boolean) {
+        getEncryptedPrefs(context).edit().putBoolean("has_shown_auto_start_prompt", shown).apply()
+    }
+
     
     fun hasValidConfig(context: Context): Boolean {
         return getServer(context).isNotEmpty() && getSecret(context).isNotEmpty() && getUuid(context).isNotEmpty()

@@ -70,6 +70,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var enableKeepAliveAudio by mutableStateOf(ConfigStore.getEnableKeepAliveAudio(application))
     /** 像素级透明悬浮窗 */
     var enableFloatWindow by mutableStateOf(ConfigStore.getEnableFloatWindow(application))
+    /** 开机自启动 */
+    var enableAutoStart by mutableStateOf(ConfigStore.getEnableAutoStart(application))
+
+    /** 首次启动自启动授权弹窗 */
+    var showAutoStartPrompt by mutableStateOf(false)
+        private set
+
 
     // ══════════════════════════════════════════════════════════════════════════
     // Shizuku 权限状态
@@ -237,6 +244,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 ctx.startService(intent)
             }
             Toast.makeText(ctx, "后台探针服务已启动", Toast.LENGTH_SHORT).show()
+            
+            // 启动成功后，检查是否需要显示自启动授权弹窗
+            checkAndShowAutoStartPrompt()
         }
 
         // Android 13+ 通知权限时序控制
@@ -258,7 +268,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * 检查是否需要显示首次开机自启动授权弹窗
+     */
+    private fun checkAndShowAutoStartPrompt() {
+        val ctx = getApplication<Application>()
+        if (!ConfigStore.getHasShownAutoStartPrompt(ctx)) {
+            showAutoStartPrompt = true
+        }
+    }
+
+    /**
+     * 处理自启动授权弹窗结果
+     */
+    fun onAutoStartPromptResult(accepted: Boolean) {
+        val ctx = getApplication<Application>()
+        enableAutoStart = accepted
+        ConfigStore.setEnableAutoStart(ctx, accepted)
+        ConfigStore.setHasShownAutoStartPrompt(ctx, true)
+        showAutoStartPrompt = false
+    }
+
+    /**
+     * 工具页手动切换自启动开关
+     */
+    fun toggleAutoStart(enabled: Boolean) {
+        enableAutoStart = enabled
+        ConfigStore.setEnableAutoStart(getApplication(), enabled)
+    }
+
+    /**
      * 处理 Root/Shizuku 模式切换。
+
      *
      * 开启时自动检测 Shizuku 可用性并按需请求权限。
      */
