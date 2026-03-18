@@ -1,7 +1,9 @@
 package com.nezhahq.agent.executor
 
 import android.content.Context
+import android.os.Environment
 import com.nezhahq.agent.util.Logger
+import com.nezhahq.agent.util.RootShell
 import com.google.protobuf.ByteString
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
@@ -9,6 +11,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import proto.Nezha
 import proto.NezhaServiceGrpcKt.NezhaServiceCoroutineStub
+import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.concurrent.atomic.AtomicBoolean
@@ -63,12 +66,15 @@ class TerminalManager(
     suspend fun run() {
         try {
             coroutineScope {
-                // 1. 启动 sh 子进程
-                val pb = ProcessBuilder("/system/bin/sh")
-                pb.redirectErrorStream(true)
-                process = pb.start()
+                // 1. 选择 Shell 类型并启动子进程
+                //    优先使用 su（Root），其次 Shizuku，最后普通 sh
+                //    显式切入 IO 调度器，避免 Thread.sleep / ProcessBuilder.start 阻塞非 IO 线程
+                val (shellProcess, shellType) = withContext(Dispatchers.IO) {
+                    startShellProcess()
+                }
+                process = shellProcess
                 shellInput = process!!.outputStream
-                Logger.i("TerminalManager: Shell 子进程已启动（StreamID=$streamId）")
+                Logger.i("TerminalManager: Shell 子进程已启动 (type=$shellType, StreamID=$streamId)")
 
                 // 2. 启动 stdout 读取协程
                 launch(Dispatchers.IO) {
@@ -86,9 +92,14 @@ class TerminalManager(
                     .build()
                 outputChannel.send(headerMsg)
 
-                // 4. 发送欢迎横幅
+                // 4. 发送欢迎横幅（显示当前 Shell 权限类型）
+                val typeLabel = when (shellType) {
+                    "su"      -> "Root"
+                    "shizuku" -> "Shizuku (ADB)"
+                    else      -> "普通"
+                }
                 sendOutput("\r\n========== Nezha Agent Terminal ==========\r\n")
-                sendOutput("  输入 @agent help 查看虚拟指令\r\n")
+                sendOutput("  模式: $typeLabel | 输入 @agent help 查看虚拟指令\r\n")
                 sendOutput("==========================================\r\n\r\n")
                 sendOutput(PROMPT)
 
@@ -273,6 +284,102 @@ class TerminalManager(
                 )
             }
         } catch (_: Exception) {}
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // Shell 进程启动策略（三级回退）
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * 启动 Shell 子进程，根据设备提权能力选择最优方式。
+     *
+     * ## 三级回退策略
+     * 1. **Root (su)**：通过 `su` 启动 Root Shell，拥有完整系统访问权限
+     * 2. **Shizuku (ADB)**：通过 Shizuku 服务启动 ADB 级别 Shell (UID 2000)
+     * 3. **普通 (sh)**：使用 `/system/bin/sh`，权限受限于应用沙箱
+     *
+     * ## 工作目录选择
+     * - Root/Shizuku 模式：`/sdcard`（用户有最强的使用直觉）
+     * - 普通模式：应用数据目录（`context.filesDir`，确保有读写权限）
+     *
+     * @return Pair<Process, String>，其中 String 为 Shell 类型标识
+     *         ("su" / "shizuku" / "sh")
+     */
+    private fun startShellProcess(): Pair<Process, String> {
+        // ── 选择工作目录 ──────────────────────────────────────────────
+        // 确定一个有权限访问的默认工作目录
+        val defaultDir = context.filesDir  // 应用沙箱目录，始终有权限
+        val sdcardDir = Environment.getExternalStorageDirectory()  // /sdcard
+
+        // ── 策略 1：尝试 su（Root Shell）────────────────────────────
+        try {
+            val pb = ProcessBuilder("su")
+            pb.redirectErrorStream(true)
+            pb.directory(sdcardDir)  // Root 权限下 /sdcard 更方便用户操作
+            val p = pb.start()
+            // 短暂等待让 su 有时间初始化或退出
+            Thread.sleep(200)
+            try {
+                p.exitValue()
+                // 能拿到 exitValue 说明 su 已退出（权限被拒绝或不存在）
+                Logger.i("TerminalManager: su 进程秒退，尝试 Shizuku...")
+            } catch (e: IllegalThreadStateException) {
+                // 抛出异常说明进程仍在运行 → su 启动成功！
+                Logger.i("TerminalManager: Root Shell (su) 启动成功")
+                return Pair(p, "su")
+            }
+        } catch (e: Exception) {
+            Logger.i("TerminalManager: su 不可用 (${e.message})，尝试 Shizuku...")
+        }
+
+        // ── 策略 2：尝试 Shizuku (ADB Shell) ──────────────────────
+        try {
+            if (isShizukuAvailableForTerminal()) {
+                @Suppress("DEPRECATION")
+                val method = rikka.shizuku.Shizuku::class.java.getDeclaredMethod(
+                    "newProcess",
+                    Array<String>::class.java,
+                    Array<String>::class.java,
+                    String::class.java
+                )
+                method.isAccessible = true
+                // Shizuku.newProcess 第三个参数是工作目录路径
+                val p = method.invoke(
+                    null,
+                    arrayOf("sh"),
+                    null,
+                    sdcardDir.absolutePath
+                ) as Process
+                Logger.i("TerminalManager: Shizuku Shell 启动成功")
+                return Pair(p, "shizuku")
+            }
+        } catch (e: Exception) {
+            Logger.e("TerminalManager: Shizuku Shell 启动失败", e)
+        }
+
+        // ── 策略 3：回退到普通 sh ──────────────────────────────────
+        Logger.i("TerminalManager: 使用普通 sh（权限受限于应用沙箱）")
+        val pb = ProcessBuilder("/system/bin/sh")
+        pb.redirectErrorStream(true)
+        pb.directory(defaultDir)  // 普通模式使用应用数据目录，确保有读写权限
+        val p = pb.start()
+        return Pair(p, "sh")
+    }
+
+    /**
+     * 检测 Shizuku 是否可用并已授权（独立于 RootShell 的检测逻辑）。
+     * 终端进程不复用 RootShell 的持久会话，而是启动独立的 Shell 进程，
+     * 因此需要独立检测 Shizuku 的可用性。
+     */
+    private fun isShizukuAvailableForTerminal(): Boolean {
+        return try {
+            rikka.shizuku.Shizuku.pingBinder()
+                    && !rikka.shizuku.Shizuku.isPreV11()
+                    && rikka.shizuku.Shizuku.checkSelfPermission() ==
+                       android.content.pm.PackageManager.PERMISSION_GRANTED
+        } catch (e: Exception) {
+            false
+        }
     }
 
     private suspend fun sendOutput(text: String) = sendOutput(text.toByteArray(Charsets.UTF_8))

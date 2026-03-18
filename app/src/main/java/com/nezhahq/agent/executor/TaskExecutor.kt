@@ -93,24 +93,26 @@ object TaskExecutor {
                     val url = params.host
                     val start = System.currentTimeMillis()
                     val request = Request.Builder().url(url).build()
-                    val response = client.newCall(request).execute()
-                    val delay = (System.currentTimeMillis() - start).toFloat()
+                    // 使用 .use {} 确保 Response 在异常时也能正确释放，
+                    // 防止 OkHttp 连接池泄漏（原 response.close() 在异常路径下不会执行）
+                    client.newCall(request).execute().use { response ->
+                        val delay = (System.currentTimeMillis() - start).toFloat()
 
-                    // 提取 SSL 证书信息（仅 HTTPS 连接有 handshake）
-                    // 官方 Go Agent 格式：result.Data = c.Issuer.CommonName + "|" + c.NotAfter.String()
-                    var certData = ""
-                    response.handshake?.peerCertificates?.firstOrNull()?.let { cert ->
-                        if (cert is X509Certificate) {
-                            val issuerCN = extractCN(cert.issuerX500Principal.name) ?: cert.issuerX500Principal.name
-                            // 使用与 Go time.Time.String() 一致的格式输出
-                            certData = "$issuerCN|${cert.notAfter}"
+                        // 提取 SSL 证书信息（仅 HTTPS 连接有 handshake）
+                        // 官方 Go Agent 格式：result.Data = c.Issuer.CommonName + "|" + c.NotAfter.String()
+                        var certData = ""
+                        response.handshake?.peerCertificates?.firstOrNull()?.let { cert ->
+                            if (cert is X509Certificate) {
+                                val issuerCN = extractCN(cert.issuerX500Principal.name) ?: cert.issuerX500Principal.name
+                                // 使用与 Go time.Time.String() 一致的格式输出
+                                certData = "$issuerCN|${cert.notAfter}"
+                            }
                         }
-                    }
-                    response.close()
 
-                    resultBuilder.setDelay(delay)
-                        .setSuccessful(response.isSuccessful)
-                        .setData(certData)
+                        resultBuilder.setDelay(delay)
+                            .setSuccessful(response.isSuccessful)
+                            .setData(certData)
+                    }
                 }
 
                 // ── TaskType 2：ICMP Ping ────────────────────────────────────
@@ -118,10 +120,17 @@ object TaskExecutor {
                     val params = parseParams(task.data)
                     val start = System.currentTimeMillis()
                     val process = ProcessBuilder("ping", "-c", "1", "-w", "5", params.host).start()
-                    val exitVal = process.waitFor()
+                    // 使用带超时的 waitFor 防止 ping 命令在某些魔改 ROM 上死锁
+                    val completed = process.waitFor(10, TimeUnit.SECONDS)
                     val delay = (System.currentTimeMillis() - start).toFloat()
 
-                    resultBuilder.setDelay(delay).setSuccessful(exitVal == 0)
+                    if (completed) {
+                        resultBuilder.setDelay(delay).setSuccessful(process.exitValue() == 0)
+                    } else {
+                        // 超时，强制终止 ping 进程
+                        try { process.destroyForcibly() } catch (_: Exception) {}
+                        resultBuilder.setDelay(delay).setSuccessful(false)
+                    }
                 }
 
                 // ── TaskType 3：TCP Ping ─────────────────────────────────────

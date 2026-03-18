@@ -79,6 +79,20 @@ class AgentService : Service() {
         
         Logger.i("Service started, configuring Grpc...")
         GrpcManager.initialize(this)
+
+        // ── 清理上次可能因 App Crash 遗留的临时上传文件 ───────────────────
+        // FileManager 上传时使用 cacheDir/nezha_upload_{time}.tmp 作为中转，
+        // 正常流程会在完成/异常时删除，但若 App 被系统强杀则会残留。
+        scope.launch(Dispatchers.IO) {
+            try {
+                cacheDir.listFiles { file ->
+                    file.name.startsWith("nezha_upload_") && file.name.endsWith(".tmp")
+                }?.forEach { staleFile ->
+                    Logger.i("AgentService: 清理残留临时文件: ${staleFile.name}")
+                    staleFile.delete()
+                }
+            } catch (_: Exception) {}
+        }
         
         Logger.i("Initializing network listeners and daemon coroutines...")
         setupNetworkListener()
