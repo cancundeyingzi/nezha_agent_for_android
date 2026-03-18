@@ -8,6 +8,9 @@
 原有:cpu gpu,内存,虚拟内存,磁盘,网速,连接数,进程数,负载,架构,IP地址,系统版本,运行时间,内网穿透.....还有别的吗?         
 额外:0高强度后台保活.(需要手动授权,另外谁能告诉我拼多多是怎么保活的？         
 1短信读取,我有时候要读一下验证码.(0.5版本)          
+2vpn模式读取网速，使用案例：联通云手机（0.8版本）安卓12以下没有权限的可以尝试。安卓12及以上应该有可以直接读取的方案。如果不行请发issues
+
+
 
 root:   
 <img alt="image" src="https://raw.githubusercontent.com/cancundeyingzi/nezha_agent_apk/refs/heads/main/.github/ec549e16-576d-443a-b590-71a6ef1341fd.png" />
