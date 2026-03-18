@@ -4,6 +4,7 @@ import android.app.AppOpsManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Environment
 import android.os.PowerManager
 import android.os.Process
 import android.provider.Settings
@@ -79,6 +80,11 @@ object PermissionChecker {
                 name = "开机自启动",
                 key = "auto_start",
                 granted = ConfigStore.getEnableAutoStart(context)
+            ),
+            PermissionItem(
+                name = "所有文件访问",
+                key = "storage",
+                granted = checkStoragePermission(context)
             )
         )
     }
@@ -176,5 +182,24 @@ object PermissionChecker {
      */
     private fun checkNotificationPermission(context: Context): Boolean {
         return NotificationManagerCompat.from(context).areNotificationsEnabled()
+    }
+
+    /**
+     * 检测文件管理器所需的存储访问权限。
+     *
+     * - Android 11+ (API 30)：检查 MANAGE_EXTERNAL_STORAGE 权限
+     *   （需用户在系统设置中手动授权「所有文件访问」）。
+     *   此权限可绕过 Scoped Storage FUSE 过滤，使 File.listFiles()
+     *   在非 Root 模式下也能返回完整的文件和目录列表。
+     * - Android 10 及以下：检查 READ_EXTERNAL_STORAGE 运行时权限。
+     */
+    private fun checkStoragePermission(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            ContextCompat.checkSelfPermission(
+                context, android.Manifest.permission.READ_EXTERNAL_STORAGE
+            ) == PackageManager.PERMISSION_GRANTED
+        }
     }
 }

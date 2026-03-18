@@ -2,6 +2,7 @@ package com.nezhahq.agent.executor
 
 import android.content.Context
 import android.content.pm.PackageManager
+import com.nezhahq.agent.util.ConfigStore
 import com.nezhahq.agent.util.Logger
 import com.nezhahq.agent.util.RootShell
 import com.google.protobuf.ByteString
@@ -126,51 +127,117 @@ class FileManager(
         }
     }
 
+    /**
+     * 列出指定目录的内容并发送给 Dashboard。
+     *
+     * ## 策略优先级（关键修复）
+     * Android 11+ 的 Scoped Storage FUSE 层会过滤 File.listFiles() 的结果——
+     * 即使返回非 null，结果中也可能**只包含目录而过滤掉所有文件**。
+     * 因此当 Root/Shizuku 可用时，**优先使用 RootShell ls** 绕过 FUSE 限制。
+     *
+     * 1. Root/Shizuku 模式：优先 `ls -1Ap`（绕过 FUSE，看到完整文件列表）
+     * 2. Java IO：普通模式或 Root ls 失败时使用 `File.listFiles()`
+     * 3. 兜底：回退到 DEFAULT_HOME
+     */
     private suspend fun listDir(requestedDir: String) {
-        var dir = requestedDir
+        // 空路径处理（Dashboard 初次连接可能发送空字符串）
+        var dir = requestedDir.ifBlank { DEFAULT_HOME }
+        val isRootMode = ConfigStore.getRootMode(context)
 
+        // ── 策略 1：Root/Shizuku 模式优先使用 ls 命令 ──────────────────────
+        // 关键：Android 11+ FUSE 会过滤 File.listFiles()，导致只能看到文件夹，
+        // ls 命令直接通过内核读取 inode，不受 FUSE 过滤影响。
+        if (isRootMode) {
+            val shellEntries = listDirViaShell(dir)
+            if (shellEntries != null) {
+                if (!dir.endsWith("/")) dir += "/"
+                val response = buildListDirResponse(dir, shellEntries)
+                Logger.i("FileManager: RootShell ls 列目录成功: $dir, 共 ${shellEntries.size} 条目 (StreamID=$streamId)")
+                sendData(response)
+                return
+            }
+            Logger.i("FileManager: RootShell ls 无法访问 $dir，回退到 Java IO...")
+        }
+
+        // ── 策略 2：Java IO（普通模式或 Root ls 失败时）───────────────────
         val javaFile = File(dir)
         val javaEntries = javaFile.listFiles()
-        if (javaEntries != null) {
-            val response = buildListDirResponse(dir, javaEntries.map {
-                FileEntry(it.name, it.isDirectory)
-            })
-            sendData(response)
-            return
-        }
-
-        Logger.i("FileManager: Java IO 无权限访问 $dir，尝试 RootShell 回退...")
-        val shellResult = withContext(Dispatchers.IO) {
-            RootShell.execute("ls -1Ap ${shellEscape(dir)}")
-        }
-
-        if (shellResult.isNotBlank()) {
-            val entries = shellResult.lines()
-                .filter { it.isNotBlank() }
-                .map { line ->
-                    if (line.endsWith("/")) {
-                        FileEntry(line.dropLast(1), isDir = true)
-                    } else {
-                        FileEntry(line, isDir = false)
-                    }
-                }
+        if (javaEntries != null && javaEntries.isNotEmpty()) {
+            val entries = javaEntries.map { file ->
+                // 使用 try-catch 保护 isDirectory 调用，
+                // 防止符号链接/FUSE 解析失败导致异常
+                val isDir = try { file.isDirectory } catch (_: Exception) { false }
+                FileEntry(file.name, isDir)
+            }
             if (!dir.endsWith("/")) dir += "/"
+            Logger.i("FileManager: Java IO 列目录成功: $dir, 共 ${entries.size} 条目 (StreamID=$streamId)")
             val response = buildListDirResponse(dir, entries)
             sendData(response)
             return
         }
 
-        Logger.i("FileManager: RootShell 也无法访问 $dir，回退到 $DEFAULT_HOME")
+        // ── 策略 3：非 Root 模式下 Java IO 失败，尝试 RootShell 兜底 ─────
+        if (!isRootMode) {
+            Logger.i("FileManager: Java IO listFiles() 返回 null/空 (dir=$dir, exists=${javaFile.exists()}, canRead=${javaFile.canRead()})，尝试 RootShell 回退...")
+            val shellEntries = listDirViaShell(dir)
+            if (shellEntries != null) {
+                if (!dir.endsWith("/")) dir += "/"
+                val response = buildListDirResponse(dir, shellEntries)
+                sendData(response)
+                return
+            }
+        }
+
+        // ── 最终兜底：回退到 DEFAULT_HOME ───────────────────────────────────
+        Logger.i("FileManager: 所有方式均无法访问 $dir，回退到 $DEFAULT_HOME")
         dir = DEFAULT_HOME
+        // 兜底路径也优先 Root ls
+        if (isRootMode) {
+            val shellEntries = listDirViaShell(dir)
+            if (shellEntries != null) {
+                val response = buildListDirResponse(dir, shellEntries)
+                sendData(response)
+                return
+            }
+        }
         val fallbackEntries = File(dir).listFiles()
         if (fallbackEntries != null) {
             val response = buildListDirResponse(dir, fallbackEntries.map {
-                FileEntry(it.name, it.isDirectory)
+                val isDir = try { it.isDirectory } catch (_: Exception) { false }
+                FileEntry(it.name, isDir)
             })
             sendData(response)
         } else {
             sendError("无法访问目录: $requestedDir（也无法回退到 $DEFAULT_HOME）")
         }
+    }
+
+    /**
+     * 通过 RootShell 的 ls 命令列出目录内容。
+     *
+     * 使用 `ls -1Ap`：
+     * - `-1`：每行一个条目
+     * - `-A`：显示隐藏文件（除 . 和 ..）
+     * - `-p`：目录末尾追加 `/`
+     *
+     * @return 文件条目列表，失败返回 null
+     */
+    private suspend fun listDirViaShell(dir: String): List<FileEntry>? {
+        val shellResult = withContext(Dispatchers.IO) {
+            RootShell.execute("ls -1Ap ${shellEscape(dir)}")
+        }
+        if (shellResult.isBlank()) return null
+
+        val entries = shellResult.lines()
+            .filter { it.isNotBlank() }
+            .map { line ->
+                if (line.endsWith("/")) {
+                    FileEntry(line.dropLast(1), isDir = true)
+                } else {
+                    FileEntry(line, isDir = false)
+                }
+            }
+        return if (entries.isNotEmpty()) entries else null
     }
 
     private suspend fun download(filePath: String) {
@@ -340,7 +407,36 @@ class FileManager(
         }
     }
 
+    /**
+     * 打开文件的 InputStream。
+     *
+     * ## 策略优先级（与 listDir 一致的 Root-first 策略）
+     * Root/Shizuku 模式下优先使用 `su -c cat` 或 Shizuku 读取，
+     * 防止 FUSE 层因 Scoped Storage 拦截文件读取。
+     *
+     * 1. Root 模式：优先 `su -c cat`（绕过 FUSE）
+     * 2. Java FileInputStream（非 Root 或 su 失败时）
+     * 3. Shizuku（Java IO 也失败时的最后手段）
+     */
     private suspend fun openInputStreamForPath(path: String): InputStream? {
+        val isRootMode = ConfigStore.getRootMode(context)
+
+        // ── 策略 1：Root 模式优先使用 su -c cat ──────────────────────────
+        if (isRootMode) {
+            try {
+                val p = withContext(Dispatchers.IO) {
+                    Runtime.getRuntime().exec(arrayOf("su", "-c", "cat ${shellEscape(path)}"))
+                }
+                // 不再使用 delay+exitValue 的脆弱检测，直接返回 ProcessInputStream
+                // 如果文件不存在或权限不足，read() 时自然会返回 EOF 或抛异常
+                Logger.i("FileManager: 使用 Root (su) 读取文件: $path")
+                return ProcessInputStream(p)
+            } catch (e: Exception) {
+                Logger.i("FileManager: Root (su) 读取文件失败，回退到 Java IO: $path (${e.message})")
+            }
+        }
+
+        // ── 策略 2：Java FileInputStream ────────────────────────────────
         try {
             val file = File(path)
             if (file.exists() && file.canRead()) {
@@ -348,18 +444,23 @@ class FileManager(
             }
         } catch (_: Exception) {}
 
-        try {
-            val p = withContext(Dispatchers.IO) {
-                Runtime.getRuntime().exec(arrayOf("su", "-c", "cat ${shellEscape(path)}"))
-            }
-            delay(200)
-            val alive = try { p.exitValue(); false } catch (_: IllegalThreadStateException) { true }
-            if (alive) {
-                Logger.i("FileManager: 使用 Root (su) 读取文件: $path")
-                return ProcessInputStream(p)
-            }
-        } catch (_: Exception) {}
+        // ── 策略 3：非 Root 模式下尝试 su（用户可能有 Root 但未开启 Root 模式开关）
+        if (!isRootMode) {
+            try {
+                val p = withContext(Dispatchers.IO) {
+                    Runtime.getRuntime().exec(arrayOf("su", "-c", "cat ${shellEscape(path)}"))
+                }
+                delay(200)
+                val alive = try { p.exitValue(); false } catch (_: IllegalThreadStateException) { true }
+                if (alive) {
+                    Logger.i("FileManager: 使用 Root (su) 读取文件: $path")
+                    return ProcessInputStream(p)
+                }
+                try { p.destroy() } catch (_: Exception) {}
+            } catch (_: Exception) {}
+        }
 
+        // ── 策略 4：Shizuku ─────────────────────────────────────────────
         try {
             if (isShizukuAvailable()) {
                 @Suppress("DEPRECATION")

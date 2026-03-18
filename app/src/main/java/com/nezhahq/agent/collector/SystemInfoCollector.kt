@@ -3,8 +3,6 @@ package com.nezhahq.agent.collector
 import android.app.ActivityManager
 import android.content.Context
 import android.os.Build
-import android.os.Environment
-import android.os.StatFs
 import android.os.SystemClock
 import com.nezhahq.agent.util.ConfigStore
 import com.nezhahq.agent.util.Logger
@@ -42,9 +40,8 @@ object SystemInfoCollector {
 
         val isRootMode = ConfigStore.getRootMode(context)
 
-        // ── 磁盘总量（Data 分区）──────────────────────────────────────────────
-        val statFs    = StatFs(Environment.getDataDirectory().path)
-        val diskTotal = statFs.blockCountLong * statFs.blockSizeLong
+        // ── 磁盘总量（多分区扫描 + 设备去重）──────────────────────────────
+        val diskTotal = DiskCollector.getDiskInfo(isRootMode).totalBytes
 
         // ── CPU 详细名称 + 核心数 ──────────────────────────────────────────────
         val cpuName  = readCpuName(isRootMode)

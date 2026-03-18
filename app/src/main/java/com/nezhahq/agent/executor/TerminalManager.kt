@@ -245,7 +245,7 @@ class TerminalManager(
                             if (more <= 0) break
                             sendOutput(buffer.copyOf(more))
                         }
-                        Thread.sleep(100)
+                        delay(100)
                         if (inputStream.available() == 0) {
                             awaitingPrompt.set(false)
                             sendOutput(PROMPT)

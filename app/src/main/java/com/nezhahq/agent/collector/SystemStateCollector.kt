@@ -6,8 +6,6 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.net.TrafficStats
 import android.os.BatteryManager
-import android.os.Environment
-import android.os.StatFs
 import android.os.SystemClock
 import com.nezhahq.agent.util.ConfigStore
 import com.nezhahq.agent.util.Logger
@@ -99,11 +97,9 @@ class SystemStateCollector(private val context: Context) {
         // ── 2. Swap 使用量（/proc/meminfo，普通权限即可）──────────────────────
         val swapUsed = readSwapUsedBytes()
 
-        // ── 3. 磁盘使用量 ──────────────────────────────────────────────────────
-        val statFs    = StatFs(Environment.getDataDirectory().path)
-        val diskFree  = statFs.availableBlocksLong * statFs.blockSizeLong
-        val diskTotal = statFs.blockCountLong       * statFs.blockSizeLong
-        val diskUsed  = diskTotal - diskFree
+        // ── 3. 磁盘使用量（多分区扫描 + 设备去重）────────────────────────────
+        val diskInfo = DiskCollector.getDiskInfo(isRootMode)
+        val diskUsed = diskInfo.usedBytes
 
         // ── 4. 网络速度与流量 ──────────────────────────────────────────────────
         val (currentRx, currentTx) = readNetworkTrafficBytes(isRootMode)
@@ -546,21 +542,25 @@ class SystemStateCollector(private val context: Context) {
     private fun readSwapUsedBytes(): Long {
         var swapTotal = 0L
         var swapFree  = 0L
+        var foundTotal = false
+        var foundFree  = false
         try {
             File("/proc/meminfo").bufferedReader().use { reader ->
                 var line: String?
                 while (reader.readLine().also { line = it } != null) {
                     val l = line ?: continue
                     when {
-                        l.startsWith("SwapTotal:") ->
+                        !foundTotal && l.startsWith("SwapTotal:") -> {
                             swapTotal = parseKbFromMeminfoLine(l)
-                        l.startsWith("SwapFree:")  ->
-                            swapFree  = parseKbFromMeminfoLine(l)
+                            foundTotal = true
+                        }
+                        !foundFree && l.startsWith("SwapFree:") -> {
+                            swapFree = parseKbFromMeminfoLine(l)
+                            foundFree = true
+                        }
                     }
-                    // 当两个值都读到后提前退出，避免读取整个文件
-                    if (swapTotal > 0L && swapFree >= 0L) {
-                        // 判断 swapFree 是否已被赋值（初始 0 和赋值 0 难区分，读完即可）
-                    }
+                    // 两个值都读到后提前退出，避免读取整个文件
+                    if (foundTotal && foundFree) break
                 }
             }
         } catch (e: Exception) {

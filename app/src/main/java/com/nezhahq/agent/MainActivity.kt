@@ -358,6 +358,21 @@ fun ToolsScreenContent(vm: MainViewModel) {
                                     vm.toggleAutoStart(!item.granted)
                                     permissionList = com.nezhahq.agent.util.PermissionChecker.getAllPermissionStatus(context)
                                 }
+                                "storage" -> {
+                                    // Android 11+ (API 30): 跳转到「所有文件访问」权限设置页
+                                    // Android 10 及以下: 跳转到应用详情页（用户手动授权存储权限）
+                                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                                        safeStartActivity(context, Intent(
+                                            android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                                            Uri.parse("package:${context.packageName}")
+                                        ))
+                                    } else {
+                                        safeStartActivity(context, Intent(
+                                            android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                            Uri.parse("package:${context.packageName}")
+                                        ))
+                                    }
+                                }
                             }
                         }
                     )
