@@ -15,6 +15,7 @@ import androidx.core.app.NotificationCompat
 import com.nezhahq.agent.collector.GeoIpCollector
 import com.nezhahq.agent.collector.SystemInfoCollector
 import com.nezhahq.agent.collector.SystemStateCollector
+import com.nezhahq.agent.executor.FileManager
 import com.nezhahq.agent.executor.NatManager
 import com.nezhahq.agent.executor.TaskExecutor
 import com.nezhahq.agent.executor.TerminalManager
@@ -174,6 +175,22 @@ class AgentService : Service() {
                                             } catch (e: Exception) {
                                                 if (e !is CancellationException) {
                                                     Logger.e("NAT 内网穿透任务执行失败", e)
+                                                }
+                                            }
+                                        }
+                                        11L -> {
+                                            // ── TaskTypeFM（文件管理器）──
+                                            // Dashboard 请求打开文件管理器，解析 StreamID 并启动 IOStream
+                                            // 支持浏览目录 / 下载文件 / 上传文件
+                                            try {
+                                                val json = org.json.JSONObject(task.data)
+                                                val streamId = json.getString("StreamID")
+                                                Logger.i("收到文件管理器任务 (TaskID=${task.id}, StreamID=$streamId)")
+                                                val fileManager = FileManager(this@AgentService, stub, streamId)
+                                                fileManager.run()
+                                            } catch (e: Exception) {
+                                                if (e !is CancellationException) {
+                                                    Logger.e("文件管理器任务执行失败", e)
                                                 }
                                             }
                                         }
