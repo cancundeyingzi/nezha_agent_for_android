@@ -181,6 +181,7 @@ class SystemStateCollector(private val context: Context) {
      * - 普通模式（Android 12+）：遍历 NetworkInterface 并调用 TrafficStats.getRxBytes(iface.name)。
      * - 普通模式（Android 6+ 降级）：尝试使用 NetworkStatsManager 查询设备总计。
      * - 普通模式（最低兜底）：使用 TrafficStats.getTotalRxBytes()，若被系统拦截或不支持则回退为 0。
+     * - VPN 纯计量模式（最终兜底）：TrafficVpnService 定时读取 /proc/net/dev，不拦截任何流量。
      */
     private fun readNetworkTrafficBytes(isRootMode: Boolean): Pair<Long, Long> {
         var rx = -1L
@@ -287,6 +288,19 @@ class SystemStateCollector(private val context: Context) {
             val tsTx = TrafficStats.getTotalTxBytes()
             rx = if (tsRx >= 0) tsRx else 0L
             tx = if (tsTx >= 0) tsTx else 0L
+        }
+
+        // 降级策略 4（VPN 纯计量兜底）：当所有系统 API 均返回 0 时，
+        // 从 TrafficVpnService 获取通过 /proc/net/dev 采集的流量数据。
+        // TrafficVpnService 不拦截任何网络流量，仅建立一个占位 VPN 接口，
+        // 通过定时读取 /proc/net/dev 获取真实网卡累计流量（与 Root 模式相同的数据源）。
+        // 仅在用户手动开启 VPN 模式且 VPN 服务正在运行时生效。
+        if (rx <= 0L && tx <= 0L && ConfigStore.getEnableVpnTraffic(context)) {
+            val vpnBytes = com.nezhahq.agent.service.TrafficVpnService.getTrafficBytes()
+            if (vpnBytes.first > 0 || vpnBytes.second > 0) {
+                rx = vpnBytes.first
+                tx = vpnBytes.second
+            }
         }
 
         return Pair(rx, tx)

@@ -8,6 +8,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -97,6 +98,26 @@ class AgentService : Service() {
         Logger.i("Initializing network listeners and daemon coroutines...")
         setupNetworkListener()
         startWorkLoop()
+
+        // ── VPN 流量计量服务：在无 Root/Shizuku 且 Android < 12 时的兜底方案 ──
+        // 仅当用户在工具页手动开启且 VPN 权限已预授权时才启动
+        val vpnEnabled = ConfigStore.getEnableVpnTraffic(this)
+        Logger.i("AgentService: VPN 流量计量配置 = $vpnEnabled")
+        if (vpnEnabled) {
+            try {
+                val prepareIntent = VpnService.prepare(this)
+                if (prepareIntent == null) {
+                    // VPN 已被用户授权，直接启动计量服务
+                    val vpnIntent = Intent(this, TrafficVpnService::class.java)
+                    startService(vpnIntent)
+                    Logger.i("AgentService: VPN 流量计量服务已启动")
+                } else {
+                    Logger.i("AgentService: VPN 流量计量已启用但 VPN 权限未授权（需在工具页重新开启开关以触发授权），跳过启动")
+                }
+            } catch (e: Exception) {
+                Logger.e("AgentService: VPN 流量计量服务启动异常", e)
+            }
+        }
     }
 
     private fun setupNetworkListener() {
@@ -272,5 +293,9 @@ class AgentService : Service() {
         // 关闭持久化 Root Shell 会话，释放后台 su 进程资源，防止进程泄漏
         RootShell.shutdown()
         Logger.i("RootShell persistent session closed.")
+        // 停止 VPN 流量计量服务（若正在运行）
+        try {
+            stopService(Intent(this, TrafficVpnService::class.java))
+        } catch (_: Exception) {}
     }
 }

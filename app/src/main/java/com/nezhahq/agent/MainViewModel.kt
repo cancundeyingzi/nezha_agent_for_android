@@ -72,6 +72,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var enableFloatWindow by mutableStateOf(ConfigStore.getEnableFloatWindow(application))
     /** 开机自启动 */
     var enableAutoStart by mutableStateOf(ConfigStore.getEnableAutoStart(application))
+    /** VPN 流量计量模式（无 Root/Shizuku 且 Android < 12 的兑底方案） */
+    var enableVpnTraffic by mutableStateOf(ConfigStore.getEnableVpnTraffic(application))
 
     /** 首次启动自启动授权弹窗 */
     var showAutoStartPrompt by mutableStateOf(false)
@@ -166,6 +168,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun saveToolSettings() {
         val ctx = getApplication<Application>()
+        // 工具页开关设置各自独立保存，避免被 saveConfig 全量覆写
+        ConfigStore.setEnableFloatWindow(ctx, enableFloatWindow)
+        ConfigStore.setEnableVpnTraffic(ctx, enableVpnTraffic)
         ConfigStore.saveConfig(
             ctx,
             ConfigStore.getServer(ctx),
@@ -174,8 +179,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ConfigStore.getUseTls(ctx),
             ConfigStore.getUuid(ctx),
             ConfigStore.getRootMode(ctx),
-            enableKeepAliveAudio,
-            enableFloatWindow
+            enableKeepAliveAudio
         )
         Toast.makeText(ctx, "配置已保存，请在主页停止并重新启动探针以生效", Toast.LENGTH_LONG).show()
     }
@@ -204,7 +208,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             uuid = java.util.UUID.randomUUID().toString()
         }
 
-        // 持久化配置
+        // 持久化配置（工具页的 floatWindow / vpnTraffic 由各自独立方法保存，此处不涉及）
         val currentAudioSetting = ConfigStore.getEnableKeepAliveAudio(ctx)
         ConfigStore.saveConfig(ctx, server, p, secret, useTls, uuid, rootMode, currentAudioSetting)
 

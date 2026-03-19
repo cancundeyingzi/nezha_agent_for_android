@@ -248,13 +248,16 @@ class TerminalManager(
                 val bytesRead = inputStream.read(buffer)
                 if (bytesRead == -1) break
                 if (bytesRead > 0) {
-                    sendOutput(buffer.copyOf(bytesRead))
+                    // 对 Shell 输出做 LF→CRLF 翻译（模拟 PTY 的 ONLCR 行为）
+                    // Shell 进程输出的 \n 在没有 PTY 的情况下不会自动变成 \r\n，
+                    // 导致 xterm.js 只执行"光标下移"而不回到行首，出现阶梯状排列
+                    sendOutput(translateLfToCrlf(buffer, bytesRead))
                     if (awaitingPrompt.get()) {
                         while (inputStream.available() > 0) {
                             val more = inputStream.read(buffer, 0,
                                 minOf(buffer.size, inputStream.available()))
                             if (more <= 0) break
-                            sendOutput(buffer.copyOf(more))
+                            sendOutput(translateLfToCrlf(buffer, more))
                         }
                         delay(100)
                         if (inputStream.available() == 0) {
@@ -269,6 +272,51 @@ class TerminalManager(
         } finally {
             if (!closed.get()) { sendOutput("\r\n[Shell session ended]\r\n"); close() }
         }
+    }
+
+    /**
+     * 模拟 PTY 的 ONLCR（Output NL-CR）行为：
+     * 将 Shell 输出中孤立的 \n (0x0A) 翻译为 \r\n (0x0D 0x0A)。
+     *
+     * ## 为什么需要这个？
+     * 真正的伪终端（PTY）内核驱动会自动做这个翻译（termios OPOST+ONLCR 标志），
+     * 但我们使用的是 ProcessBuilder 的原始管道（非 PTY），Shell 输出的 \n 不会
+     * 自动变成 \r\n。xterm.js 等终端模拟器收到孤立的 \n 后只执行"光标下移"，
+     * 不回到行首，导致命令输出呈"阶梯状"。
+     *
+     * ## 翻译规则
+     * - `\n` 前面没有 `\r` → 插入 `\r` 变成 `\r\n`
+     * - `\r\n` 已经存在 → 保持不变，不做重复翻译
+     *
+     * @param data   原始字节缓冲区
+     * @param length 有效字节数
+     * @return 翻译后的字节数组
+     */
+    private fun translateLfToCrlf(data: ByteArray, length: Int): ByteArray {
+        // 快速路径：先扫描是否有需要翻译的孤立 \n，没有则直接返回原数据的拷贝
+        var needsTranslation = false
+        for (i in 0 until length) {
+            if (data[i] == 0x0A.toByte()) {
+                if (i == 0 || data[i - 1] != 0x0D.toByte()) {
+                    needsTranslation = true
+                    break
+                }
+            }
+        }
+        if (!needsTranslation) return data.copyOf(length)
+
+        // 需要翻译：最坏情况每个字节都是 \n，输出长度翻倍
+        val out = ByteArray(length * 2)
+        var pos = 0
+        for (i in 0 until length) {
+            val b = data[i]
+            if (b == 0x0A.toByte() && (i == 0 || data[i - 1] != 0x0D.toByte())) {
+                // 孤立的 \n → 插入 \r\n
+                out[pos++] = 0x0D.toByte()
+            }
+            out[pos++] = b
+        }
+        return out.copyOf(pos)
     }
 
     /** 协议心跳：每 30 秒发送空数据包保持连接。 */

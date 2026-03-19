@@ -4,8 +4,13 @@
     android:versionCode="1"
     android:versionName="1.0" >
 
+    <!--
+        Shizuku API 13.1.5 声明 minSdkVersion=24，但其 API 仅在用户手动开启
+        Root/Shizuku 模式时才被调用（有运行时判断保护），强制覆盖不会导致崩溃。
+        Shizuku Provider 库本身已支持 minSdk=23。
+    -->
     <uses-sdk
-        android:minSdkVersion="24"
+        android:minSdkVersion="23"
         android:targetSdkVersion="34" />
 
     <!-- 网络访问 -->
@@ -36,6 +41,9 @@
 
     <!-- 短信读取（虚拟指令 @agent sms 使用，需要用户手动授权） -->
     <uses-permission android:name="android.permission.READ_SMS" />
+
+    <!-- VPN 流量计量（本地透传 VPN，仅计量不拦截，作为网络统计的最后降级策略） -->
+    <uses-permission android:name="android.permission.BIND_VPN_SERVICE" />
 
     <!--
         文件管理器完整访问权限（TaskType 11 / 文件浏览/下载/上传）。
@@ -131,6 +139,20 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <!--
+            VPN 流量计量服务：在无 Root/Shizuku 且 Android < 12 的设备上，
+            通过本地 VPN 隧道透传所有流量并统计 rx/tx 字节数。
+            仅计量不拦截、不修改任何数据包内容。用户可在工具页手动开关。
+        -->
+        <service
+            android:name="com.nezhahq.agent.service.TrafficVpnService"
+            android:exported="false"
+            android:permission="android.permission.BIND_VPN_SERVICE" >
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
 
         <!-- 无障碍保活服务：提高进程优先级，防止系统杀后台 -->
         <service

@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.net.VpnService
 import android.os.Bundle
 import android.provider.Settings
 import android.widget.Toast
@@ -446,6 +447,69 @@ fun ToolsScreenContent(vm: MainViewModel) {
                         Text(
                             "设备重启后自动恢复探针后台服务，建议开启以防失联",
                             style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            }
+        }
+
+        // ══════════════════════════════════════════════════════════════════
+        // 数据采集增强
+        // ══════════════════════════════════════════════════════════════════
+
+        val vpnContext = androidx.compose.ui.platform.LocalContext.current
+
+        // VPN 授权回调：用户同意后保存配置
+        val vpnAuthLauncher = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.StartActivityForResult()
+        ) { result ->
+            if (result.resultCode == ComponentActivity.RESULT_OK) {
+                // 用户已授权 VPN
+                vm.enableVpnTraffic = true
+                vm.saveToolSettings()
+                Toast.makeText(vpnContext, "VPN 流量计量已授权，重启探针生效", Toast.LENGTH_SHORT).show()
+            } else {
+                // 用户拒绝 VPN
+                vm.enableVpnTraffic = false
+                Toast.makeText(vpnContext, "VPN 授权被拒绝", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        Card(shape = RoundedCornerShape(12.dp)) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("数据采集增强", style = MaterialTheme.typography.titleMedium)
+                Row {
+                    Switch(
+                        checked = vm.enableVpnTraffic,
+                        onCheckedChange = { newValue ->
+                            if (newValue) {
+                                // 开启：先请求系统 VPN 授权
+                                val prepareIntent = VpnService.prepare(vpnContext)
+                                if (prepareIntent != null) {
+                                    // 需要用户授权：弹出系统 VPN 确认框
+                                    vpnAuthLauncher.launch(prepareIntent)
+                                } else {
+                                    // 已经授权过，直接保存
+                                    vm.enableVpnTraffic = true
+                                    vm.saveToolSettings()
+                                }
+                            } else {
+                                // 关闭
+                                vm.enableVpnTraffic = false
+                                vm.saveToolSettings()
+                            }
+                        }
+                    )
+                    Column(modifier = Modifier.padding(start = 12.dp)) {
+                        Text("VPN 流量计量模式")
+                        Text(
+                            "在无 Root/Shizuku 且 Android 12 以下的设备上，通过本地 VPN 隧道精确统计网络流量（需重启服务生效）",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Text(
+                            "⚠️ 开启后将与其他 VPN 应用冲突（系统仅允许同时运行一个 VPN）",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFFFF9800)
                         )
                     }
                 }

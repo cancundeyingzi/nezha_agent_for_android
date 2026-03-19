@@ -38,7 +38,13 @@ object ConfigStore {
         }
     }
 
-    fun saveConfig(context: Context, server: String, port: Int, secret: String, useTLS: Boolean = true, uuid: String = "", rootMode: Boolean = false, enableKeepAliveAudio: Boolean = false, enableFloatWindow: Boolean = false) {
+    /**
+     * 保存连接配置和基础工具设置。
+     *
+     * 注意：enable_vpn_traffic 由 [setEnableVpnTraffic] 独立管理，
+     * 不在此方法中写入，防止全量覆写导致设置被重置。
+     */
+    fun saveConfig(context: Context, server: String, port: Int, secret: String, useTLS: Boolean = true, uuid: String = "", rootMode: Boolean = false, enableKeepAliveAudio: Boolean = false) {
         getEncryptedPrefs(context).edit().apply {
             putString("server", server)
             putInt("port", port)
@@ -47,7 +53,8 @@ object ConfigStore {
             putString("uuid", uuid)
             putBoolean("root_mode", rootMode)
             putBoolean("enable_keep_alive_audio", enableKeepAliveAudio)
-            putBoolean("enable_float_window", enableFloatWindow)
+            // enable_float_window 由 setEnableFloatWindow() 独立管理
+            // enable_vpn_traffic 由 setEnableVpnTraffic() 独立管理
             apply()
         }
     }
@@ -60,18 +67,28 @@ object ConfigStore {
     fun getRootMode(context: Context): Boolean = getEncryptedPrefs(context).getBoolean("root_mode", false)
     fun getEnableKeepAliveAudio(context: Context): Boolean = getEncryptedPrefs(context).getBoolean("enable_keep_alive_audio", false)
     fun getEnableFloatWindow(context: Context): Boolean = getEncryptedPrefs(context).getBoolean("enable_float_window", false)
+    fun getEnableVpnTraffic(context: Context): Boolean = getEncryptedPrefs(context).getBoolean("enable_vpn_traffic", false)
     fun getEnableAutoStart(context: Context): Boolean = getEncryptedPrefs(context).getBoolean("enable_auto_start", false)
     fun getHasShownAutoStartPrompt(context: Context): Boolean = getEncryptedPrefs(context).getBoolean("has_shown_auto_start_prompt", false)
 
     fun setEnableAutoStart(context: Context, enable: Boolean) {
         getEncryptedPrefs(context).edit().putBoolean("enable_auto_start", enable).apply()
     }
-    
+
     fun setHasShownAutoStartPrompt(context: Context, shown: Boolean) {
         getEncryptedPrefs(context).edit().putBoolean("has_shown_auto_start_prompt", shown).apply()
     }
 
-    
+    /** 悬浮窗开关 — 独立保存，不受 saveConfig 全量覆写影响 */
+    fun setEnableFloatWindow(context: Context, enable: Boolean) {
+        getEncryptedPrefs(context).edit().putBoolean("enable_float_window", enable).apply()
+    }
+
+    /** VPN 流量计量开关 — 独立保存，不受 saveConfig 全量覆写影响 */
+    fun setEnableVpnTraffic(context: Context, enable: Boolean) {
+        getEncryptedPrefs(context).edit().putBoolean("enable_vpn_traffic", enable).apply()
+    }
+
     fun hasValidConfig(context: Context): Boolean {
         return getServer(context).isNotEmpty() && getSecret(context).isNotEmpty() && getUuid(context).isNotEmpty()
     }
