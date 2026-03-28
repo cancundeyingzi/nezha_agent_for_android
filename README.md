@@ -3,6 +3,8 @@
 他人magisk地址  https://github.com/castula/magisk_nezha-agent
 
 使用好看的UI优雅的在安卓设备上使用nezha探针     
+![40bca73fe4114a409ba25bc055dfd97f](https://github.com/user-attachments/assets/731980ce-470f-41e5-aec2-87e09a9149d2)
+
 项目采用尽力而为的方式,根据不同权限,尽力获取更多数据,同时将权限开放至用户,可根据需要自行授权,不授权没有任何恶意限制.    
 
 尽量保持原有功能,额外新增功能     
@@ -13,8 +15,7 @@
 
 
 
-root:   
-<img alt="image" src="https://raw.githubusercontent.com/cancundeyingzi/nezha_agent_apk/refs/heads/main/.github/ec549e16-576d-443a-b590-71a6ef1341fd.png" />
+
 移动云手机极致版：  
 <img width="854" height="576" alt="image" src="https://github.com/user-attachments/assets/e1c1088e-bef7-40aa-b00e-7ae6e9cc9fe5" />
 
