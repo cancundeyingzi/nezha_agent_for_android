@@ -29,6 +29,7 @@ import com.nezhahq.agent.util.KeepAliveAudioPlayer
 import com.nezhahq.agent.util.FloatWindowManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.sync.Semaphore
 import proto.Nezha.Receipt
 import proto.Nezha.TaskResult
 
@@ -46,7 +47,18 @@ class AgentService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private val stateCollector by lazy { SystemStateCollector(this) }
     private val audioPlayer = KeepAliveAudioPlayer()
-    
+
+    // ── [修复问题5] 保存 NetworkCallback 引用，以便在 onDestroy 中注销 ──────
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var connectivityManager: ConnectivityManager? = null
+
+    // ── [修复问题3] 任务并发限制信号量 ──────────────────────────────────────
+    // 限制同时执行的任务协程数量，防止恶意 flood 或慢网场景下协程无界增长
+    private val taskSemaphore = Semaphore(8)
+
+    // ── 通知渠道 ID ──────────────────────────────────────────────────────────
+    private val notificationChannelId = "nezha_agent_service"
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -69,18 +81,18 @@ class AgentService : Service() {
                 @Suppress("InlinedApi")
                 startForeground(
                     1001,
-                    createNotification(),
+                    createNotification("正在连接..."),
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
                 )
             }
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> {
                 startForeground(
                     1001,
-                    createNotification(),
+                    createNotification("正在连接..."),
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
                 )
             }
-            else -> startForeground(1001, createNotification())
+            else -> startForeground(1001, createNotification("正在连接..."))
         }
         acquireWakeLock()
         
@@ -107,31 +119,36 @@ class AgentService : Service() {
         setupNetworkListener()
         startWorkLoop()
 
-        // ── VPN 流量计量服务：在无 Root/Shizuku 且 Android < 12 时的兜底方案 ──
-        // 仅当用户在工具页手动开启且 VPN 权限已预授权时才启动
+        // ── VPN 流量计量服务 ──────────────────────────────────────────────────
         val vpnEnabled = ConfigStore.getEnableVpnTraffic(this)
         Logger.i("AgentService: VPN 流量计量配置 = $vpnEnabled")
         if (vpnEnabled) {
-            try {
-                val prepareIntent = VpnService.prepare(this)
-                if (prepareIntent == null) {
-                    // VPN 已被用户授权，直接启动计量服务
-                    val vpnIntent = Intent(this, TrafficVpnService::class.java)
-                    startService(vpnIntent)
-                    Logger.i("AgentService: VPN 流量计量服务已启动")
-                } else {
-                    Logger.i("AgentService: VPN 流量计量已启用但 VPN 权限未授权（需在工具页重新开启开关以触发授权），跳过启动")
+            // [修复问题7] 添加 Android 版本检查，VPN 流量计量仅适用于 Android 12 以下
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                Logger.i("AgentService: Android 12+ 设备不需要 VPN 流量计量（系统已有精确统计 API），跳过启动")
+            } else {
+                try {
+                    val prepareIntent = VpnService.prepare(this)
+                    if (prepareIntent == null) {
+                        // VPN 已被用户授权，直接启动计量服务
+                        val vpnIntent = Intent(this, TrafficVpnService::class.java)
+                        startService(vpnIntent)
+                        Logger.i("AgentService: VPN 流量计量服务已启动")
+                    } else {
+                        Logger.i("AgentService: VPN 流量计量已启用但 VPN 权限未授权（需在工具页重新开启开关以触发授权），跳过启动")
+                    }
+                } catch (e: Exception) {
+                    Logger.e("AgentService: VPN 流量计量服务启动异常", e)
                 }
-            } catch (e: Exception) {
-                Logger.e("AgentService: VPN 流量计量服务启动异常", e)
             }
         }
     }
 
     private fun setupNetworkListener() {
-        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val request = NetworkRequest.Builder().addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build()
-        cm.registerNetworkCallback(request, object : ConnectivityManager.NetworkCallback() {
+        // [修复问题5] 保存 NetworkCallback 引用，防止泄漏
+        val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 // Network changed, update geoIP
                 Logger.i("Network dynamically available, polling full GeoIP metadata...")
@@ -146,7 +163,9 @@ class AgentService : Service() {
                     }
                 }
             }
-        })
+        }
+        networkCallback = callback
+        connectivityManager?.registerNetworkCallback(request, callback)
     }
 
     private fun startWorkLoop() {
@@ -154,8 +173,18 @@ class AgentService : Service() {
             while (isActive) {
                 try {
                     GrpcManager.updateState(GrpcConnectionState.CONNECTING)
+                    updateNotification("正在连接...")
                     Logger.i("Preparing to handshake and send reports to Dashboard...")
-                    val stub = GrpcManager.stub ?: throw Exception("Stub not initialized")
+
+                    // [修复问题6] 配置校验：stub 为空时等待重试而非反复抛异常
+                    val stub = GrpcManager.stub
+                    if (stub == null) {
+                        Logger.e("AgentService: GrpcManager.stub 未初始化（配置可能不完整），5秒后重试...")
+                        updateNotification("配置不完整，等待重试")
+                        delay(5000)
+                        GrpcManager.initialize(this@AgentService)
+                        continue
+                    }
                     
                     // 1. Report Host Info
                     Logger.i("Sending Static Host Information (ReportSystemInfo2)...")
@@ -170,6 +199,7 @@ class AgentService : Service() {
                     // 3. Bidirectional streams (Status & Tasks)
                     Logger.i("Handshake success. Opening Bidirectional streams for SystemState and Tasks...")
                     GrpcManager.updateState(GrpcConnectionState.CONNECTED)
+                    updateNotification("已连接到面板")
                     // 连接握手成功，重置 TLS 失败计数
                     GrpcManager.recordConnectionSuccess()
                     coroutineScope {
@@ -188,64 +218,71 @@ class AgentService : Service() {
                         }
                         
                         launch {
-                            val resultChannel = kotlinx.coroutines.channels.Channel<TaskResult>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+                            // [修复问题3] 使用有界 Channel 防止无界内存增长
+                            // 原实现使用 Channel.UNLIMITED，慢网或恶意 flood 下队列会无界增长
+                            val resultChannel = kotlinx.coroutines.channels.Channel<TaskResult>(64)
                             stub.requestTask(resultChannel.receiveAsFlow()).collect { task ->
-                                launch {
-                                    when (task.type) {
-                                        8L -> {
-                                            // ── TaskTypeTerminalGRPC ──
-                                            // Dashboard 请求打开终端，解析 StreamID 并启动 IOStream
-                                            try {
-                                                val json = org.json.JSONObject(task.data)
-                                                val streamId = json.getString("StreamID")
-                                                Logger.i("收到终端任务 (TaskID=${task.id}, StreamID=$streamId)")
-                                                val terminal = TerminalManager(
-                                                    this@AgentService, stub, streamId
-                                                )
-                                                terminal.run()
-                                            } catch (e: Exception) {
-                                                if (e !is CancellationException) {
-                                                    Logger.e("终端任务执行失败", e)
-                                                }
+                                val isRootMode = ConfigStore.getRootMode(this@AgentService)
+                                when (task.type) {
+                                    // ── 长生命周期流式任务：不受 Semaphore 限制 ──────────
+                                    // Terminal/NAT/FileManager 的 run() 会阻塞到会话结束，
+                                    // 若占用 Semaphore 许可，8 个会话同时开启就会饿死所有短探测任务。
+                                    8L -> launch {
+                                        // ── TaskTypeTerminalGRPC ──
+                                        try {
+                                            val json = org.json.JSONObject(task.data)
+                                            val streamId = json.getString("StreamID")
+                                            Logger.i("收到终端任务 (TaskID=${task.id}, StreamID=$streamId)")
+                                            val terminal = TerminalManager(
+                                                this@AgentService, stub, streamId, isRootMode
+                                            )
+                                            terminal.run()
+                                        } catch (e: Exception) {
+                                            if (e !is CancellationException) {
+                                                Logger.e("终端任务执行失败", e)
                                             }
                                         }
-                                        9L -> {
-                                            // ── TaskTypeNAT（内网穿透/反向代理）──
-                                            // Dashboard 请求建立 NAT 通道，解析 StreamID 和 Host，
-                                            // 通过 IOStream 双向流将远端请求转发到本地目标服务
-                                            try {
-                                                val json = org.json.JSONObject(task.data)
-                                                val streamId = json.getString("StreamID")
-                                                val natHost = json.getString("Host")
-                                                Logger.i("收到 NAT 内网穿透任务 (TaskID=${task.id}, StreamID=$streamId, Host=$natHost)")
-                                                val natManager = NatManager(stub, streamId, natHost)
-                                                natManager.run()
-                                            } catch (e: Exception) {
-                                                if (e !is CancellationException) {
-                                                    Logger.e("NAT 内网穿透任务执行失败", e)
-                                                }
+                                    }
+                                    9L -> launch {
+                                        // ── TaskTypeNAT（内网穿透/反向代理）──
+                                        try {
+                                            val json = org.json.JSONObject(task.data)
+                                            val streamId = json.getString("StreamID")
+                                            val natHost = json.getString("Host")
+                                            Logger.i("收到 NAT 内网穿透任务 (TaskID=${task.id}, StreamID=$streamId, Host=$natHost)")
+                                            val natManager = NatManager(stub, streamId, natHost)
+                                            natManager.run()
+                                        } catch (e: Exception) {
+                                            if (e !is CancellationException) {
+                                                Logger.e("NAT 内网穿透任务执行失败", e)
                                             }
                                         }
-                                        11L -> {
-                                            // ── TaskTypeFM（文件管理器）──
-                                            // Dashboard 请求打开文件管理器，解析 StreamID 并启动 IOStream
-                                            // 支持浏览目录 / 下载文件 / 上传文件
-                                            try {
-                                                val json = org.json.JSONObject(task.data)
-                                                val streamId = json.getString("StreamID")
-                                                Logger.i("收到文件管理器任务 (TaskID=${task.id}, StreamID=$streamId)")
-                                                val fileManager = FileManager(this@AgentService, stub, streamId)
-                                                fileManager.run()
-                                            } catch (e: Exception) {
-                                                if (e !is CancellationException) {
-                                                    Logger.e("文件管理器任务执行失败", e)
-                                                }
+                                    }
+                                    11L -> launch {
+                                        // ── TaskTypeFM（文件管理器）──
+                                        try {
+                                            val json = org.json.JSONObject(task.data)
+                                            val streamId = json.getString("StreamID")
+                                            Logger.i("收到文件管理器任务 (TaskID=${task.id}, StreamID=$streamId)")
+                                            val fileManager = FileManager(this@AgentService, stub, streamId)
+                                            fileManager.run()
+                                        } catch (e: Exception) {
+                                            if (e !is CancellationException) {
+                                                Logger.e("文件管理器任务执行失败", e)
                                             }
                                         }
-                                        else -> {
-                                            // 其他任务类型：HTTP/ICMP/TCP/Command 等
-                                            val result = TaskExecutor.executeTask(task, isCommandEnabled = false)
+                                    }
+                                    // ── 短生命周期探测任务：受 Semaphore 背压控制 ─────────
+                                    // HTTP/ICMP/TCP/Command 等快速完成，用 Semaphore 限流防止 flood
+                                    else -> launch {
+                                        taskSemaphore.acquire()
+                                        try {
+                                            val result = TaskExecutor.executeTask(
+                                                task, isCommandEnabled = isRootMode
+                                            )
                                             resultChannel.send(result)
+                                        } finally {
+                                            taskSemaphore.release()
                                         }
                                     }
                                 }
@@ -258,18 +295,15 @@ class AgentService : Service() {
                     if (isAuthError) {
                         // 认证失败不计入 TLS 失败计数（问题在密钥/UUID，非 TLS）
                         GrpcManager.updateState(GrpcConnectionState.AUTH_FAILED)
+                        updateNotification("认证失败，请检查密钥和 UUID")
                         Logger.e("Agent loop: 认证失败，请检查密钥和 UUID 配置", e)
                     } else {
-                        // ── TLS 自动降级逻辑 ──────────────────────────────────
-                        // 如果当前使用 TLS 且连接失败，记录失败次数
-                        // 达到阈值后自动降级为明文连接
+                        // ── TLS 失败记录（仅日志，不降级） ─────────────────────────
                         if (!GrpcManager.isTlsFallbackActive()) {
-                            val shouldFallback = GrpcManager.recordTlsFailure()
-                            if (shouldFallback) {
-                                Logger.i("Agent loop: TLS 连续失败已达阈值，下次重连将使用明文传输")
-                            }
+                            GrpcManager.recordTlsFailure()
                         }
                         GrpcManager.updateState(GrpcConnectionState.RECONNECTING)
+                        updateNotification("连接断开，正在重连...")
                         Logger.e("Agent loop terminated/failed", e)
                     }
                     delay(5000) // Reconnect backoff
@@ -280,27 +314,53 @@ class AgentService : Service() {
         }
     }
 
+    // ── [修复问题4] WakeLock 无超时，由 onDestroy 显式释放 ──────────────────
+    // 原实现使用 24 小时超时，长期运行的 agent 会在 24 小时后失去保活条件
     private fun acquireWakeLock() {
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "NezhaAgent::BgWakeLock")
-        wakeLock?.acquire(24 * 60 * 60 * 1000L) // Support for long-running
+        wakeLock?.acquire() // 无超时，由 onDestroy 释放
     }
 
-    private fun createNotification(): Notification {
-        val channelId = "nezha_agent_service"
+    /**
+     * 创建前台服务通知。
+     *
+     * [修复问题6] 通知文案根据实际连接状态动态设置，
+     * 不再硬编码为 "Connected to dashboard"。
+     *
+     * @param statusText 当前连接状态描述
+     */
+    private fun createNotification(statusText: String): Notification {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
-                channelId, "Nezha Agent Status", 
+                notificationChannelId, "Nezha Agent Status", 
                 NotificationManager.IMPORTANCE_LOW
             )
             val manager = getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(channel)
         }
-        return NotificationCompat.Builder(this, channelId)
+        return NotificationCompat.Builder(this, notificationChannelId)
             .setContentTitle("Nezha Agent Running")
-            .setContentText("Connected to dashboard")
+            .setContentText(statusText)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .build()
+    }
+
+    /**
+     * 动态更新前台通知内容。
+     *
+     * [修复问题6] 根据 gRPC 实际连接状态更新通知，
+     * 让用户能通过通知栏了解真实连接情况。
+     */
+    private fun updateNotification(statusText: String) {
+        try {
+            val notification = createNotification(statusText)
+            val manager = getSystemService(NotificationManager::class.java)
+            manager?.notify(1001, notification)
+        } catch (e: Exception) {
+            // 通知更新失败不应影响核心业务
+            Logger.e("AgentService: 通知更新失败", e)
+        }
     }
 
     override fun onDestroy() {
@@ -310,6 +370,18 @@ class AgentService : Service() {
         FloatWindowManager.hide(this)
         job.cancel()
         wakeLock?.let { if (it.isHeld) it.release() }
+
+        // [修复问题5] 注销 NetworkCallback，防止泄漏和重复回调
+        networkCallback?.let { callback ->
+            try {
+                connectivityManager?.unregisterNetworkCallback(callback)
+            } catch (e: Exception) {
+                Logger.e("AgentService: 注销 NetworkCallback 异常", e)
+            }
+        }
+        networkCallback = null
+        connectivityManager = null
+
         GrpcManager.shutdown()
         // 清理 GPU 采集器缓存，确保服务重启时重新探测 sysfs 路径
         com.nezhahq.agent.collector.GpuCollector.resetCache()

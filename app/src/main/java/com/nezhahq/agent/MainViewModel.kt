@@ -200,7 +200,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         requestNotificationPerm: (() -> Unit) -> Unit
     ) {
         val ctx = getApplication<Application>()
-        val p = port.toIntOrNull() ?: 5555
+        val p = port.toIntOrNull()
+
+        // [修复问题6] 启动前配置校验，防止配置不完整时启动服务
+        // 原实现不校验配置，导致 GrpcManager.stub 为 null 后服务在循环中反复报错
+        if (server.isBlank()) {
+            Toast.makeText(ctx, "请先填写服务端 IP 或域名", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (p == null || p <= 0 || p > 65535) {
+            Toast.makeText(ctx, "端口号无效，请填写 1-65535 之间的数字", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (secret.isBlank()) {
+            Toast.makeText(ctx, "请先填写客户端密钥 (Secret)", Toast.LENGTH_SHORT).show()
+            return
+        }
 
         // 清理可能的无效 UUID
         uuid = uuid.trim().replace(Regex("^['\"]|['\"]$"), "")

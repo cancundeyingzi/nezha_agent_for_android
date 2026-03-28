@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="accessibility_desc">哪吒探针保活辅助服务：开启此服务可大幅提升探针在后台的存活率，防止系统杀后台。本服务不会读取或收集您的屏幕内容。</string>
-    <string name="app_name">Nezha Agent</string>
-    <style name="Theme.NezhaAgent" parent="android:Theme.Material.Light.NoActionBar">
-        <item name="android:statusBarColor">@android:color/transparent</item>
-    </style>
-</resources>

@@ -176,16 +176,11 @@ class FileManager(
             return
         }
 
-        // ── 策略 3：非 Root 模式下 Java IO 失败，尝试 RootShell 兜底 ─────
+        // ── 策略 3：非 Root 模式下 Java IO 失败，不再尝试 RootShell 兜底 ─────
+        // [安全修复] 原实现在 rootMode=false 时仍会回退到 RootShell/su 提权，
+        // 导致用户以为关闭了高权限模式，文件管理器仍可能获得高权限。
         if (!isRootMode) {
-            Logger.i("FileManager: Java IO listFiles() 返回 null/空 (dir=$dir, exists=${javaFile.exists()}, canRead=${javaFile.canRead()})，尝试 RootShell 回退...")
-            val shellEntries = listDirViaShell(dir)
-            if (shellEntries != null) {
-                if (!dir.endsWith("/")) dir += "/"
-                val response = buildListDirResponse(dir, shellEntries)
-                sendData(response)
-                return
-            }
+            Logger.i("FileManager: Java IO listFiles() 返回 null/空 (dir=$dir, exists=${javaFile.exists()}, canRead=${javaFile.canRead()})，rootMode=false，不尝试提权兜底")
         }
 
         // ── 最终兜底：回退到 DEFAULT_HOME ───────────────────────────────────
@@ -334,6 +329,8 @@ class FileManager(
     }
 
     private suspend fun moveFileToTarget(sourceFile: File, targetPath: String): Boolean {
+        val isRootMode = ConfigStore.getRootMode(context)
+
         // 第一次尝试：Java API
         try {
             val target = File(targetPath)
@@ -344,7 +341,13 @@ class FileManager(
             if (target.exists() && target.length() == sourceFile.length()) return true
         } catch (_: Exception) {}
 
-        // 第二次尝试：RootShell (sucp)
+        // [安全修复] 仅在 rootMode=true 时才尝试 RootShell/Shizuku 提权写入
+        if (!isRootMode) {
+            Logger.i("FileManager: Java API 写入失败且 rootMode=false，不尝试提权兜底")
+            return false
+        }
+
+        // 第二次尝试：RootShell (su cp)
         try {
             val parentDir = File(targetPath).parent ?: ""
             withContext(Dispatchers.IO) {
@@ -444,43 +447,35 @@ class FileManager(
             }
         } catch (_: Exception) {}
 
-        // ── 策略 3：非 Root 模式下尝试 su（用户可能有 Root 但未开启 Root 模式开关）
-        if (!isRootMode) {
+        // ── [安全修复] 非 Root 模式下不再尝试 su 提权读取 ─────────────────
+        // 原实现在 rootMode=false 时仍会尝试 su -c cat 读取文件，
+        // 导致用户关闭高权限模式后文件管理器仍可能获得 Root 权限。
+        // 现在仅在 Java IO 失败时返回 null，不做提权回退。
+
+        // ── 策略 3：Shizuku（仅 Root 模式下） ──────────────────────────────
+        // [安全修复] 仅在 rootMode=true 时才尝试 Shizuku 提权读取
+        if (isRootMode) {
             try {
-                val p = withContext(Dispatchers.IO) {
-                    Runtime.getRuntime().exec(arrayOf("su", "-c", "cat ${shellEscape(path)}"))
-                }
-                delay(200)
-                val alive = try { p.exitValue(); false } catch (_: IllegalThreadStateException) { true }
-                if (alive) {
-                    Logger.i("FileManager: 使用 Root (su) 读取文件: $path")
+                if (isShizukuAvailable()) {
+                    @Suppress("DEPRECATION")
+                    val method = Shizuku::class.java.getDeclaredMethod(
+                        "newProcess",
+                        Array<String>::class.java,
+                        Array<String>::class.java,
+                        String::class.java
+                    )
+                    method.isAccessible = true
+                    val p = method.invoke(
+                        null,
+                        arrayOf("sh", "-c", "cat ${shellEscape(path)}"),
+                        null, null
+                    ) as Process
+                    Logger.i("FileManager: 使用 Shizuku 读取文件: $path")
                     return ProcessInputStream(p)
                 }
-                try { p.destroy() } catch (_: Exception) {}
-            } catch (_: Exception) {}
-        }
-
-        // ── 策略 4：Shizuku ─────────────────────────────────────────────
-        try {
-            if (isShizukuAvailable()) {
-                @Suppress("DEPRECATION")
-                val method = Shizuku::class.java.getDeclaredMethod(
-                    "newProcess",
-                    Array<String>::class.java,
-                    Array<String>::class.java,
-                    String::class.java
-                )
-                method.isAccessible = true
-                val p = method.invoke(
-                    null,
-                    arrayOf("sh", "-c", "cat ${shellEscape(path)}"),
-                    null, null
-                ) as Process
-                Logger.i("FileManager: 使用 Shizuku 读取文件: $path")
-                return ProcessInputStream(p)
+            } catch (e: Exception) {
+                Logger.e("FileManager: Shizuku 读取文件失败: $path", e)
             }
-        } catch (e: Exception) {
-            Logger.e("FileManager: Shizuku 读取文件失败: $path", e)
         }
 
         return null

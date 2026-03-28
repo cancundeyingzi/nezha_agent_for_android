@@ -11,3 +11,33 @@
 
 # GitHub Copilot Instructions
 .github/copilot-instructions.md
+
+# Gradle
+.gradle
+/build/
+
+# Local configuration file (sdk path, etc)
+local.properties
+
+# Log Files
+*.log
+
+# Built application files
+*.apk
+*.ap_
+*.aab
+
+# IDEA
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Misc
+.DS_Store
+/captures
+.externalNativeBuild
+.cxx
+
+# Custom test/debug output
+status.txt

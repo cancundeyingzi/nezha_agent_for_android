@@ -36,7 +36,9 @@ import org.json.JSONObject
 class TerminalManager(
     private val context: Context,
     private val stub: NezhaServiceCoroutineStub,
-    private val streamId: String
+    private val streamId: String,
+    /** 是否启用 Root/Shizuku 高权限模式（由用户在设置中控制） */
+    private val rootMode: Boolean = false
 ) {
     private companion object {
         const val PROMPT = "nezha:/ $ "
@@ -359,53 +361,60 @@ class TerminalManager(
         val defaultDir = context.filesDir  // 应用沙箱目录，始终有权限
         val sdcardDir = Environment.getExternalStorageDirectory()  // /sdcard
 
-        // ── 策略 1：尝试 su（Root Shell）────────────────────────────
-        try {
-            val pb = ProcessBuilder("su")
-            pb.redirectErrorStream(true)
-            pb.directory(sdcardDir)  // Root 权限下 /sdcard 更方便用户操作
-            val p = pb.start()
-            // 短暂等待让 su 有时间初始化或退出
-            Thread.sleep(200)
+        // ── [安全修复] 仅在用户开启 rootMode 时才尝试提权 Shell ──────
+        // 修复：原实现无视 rootMode 开关，始终优先尝试 su/Shizuku，
+        // 导致用户关闭高权限模式后远程终端仍能获得 Root/ADB 权限。
+        if (rootMode) {
+            // ── 策略 1：尝试 su（Root Shell）────────────────────────────
             try {
-                p.exitValue()
-                // 能拿到 exitValue 说明 su 已退出（权限被拒绝或不存在）
-                Logger.i("TerminalManager: su 进程秒退，尝试 Shizuku...")
-            } catch (e: IllegalThreadStateException) {
-                // 抛出异常说明进程仍在运行 → su 启动成功！
-                Logger.i("TerminalManager: Root Shell (su) 启动成功")
-                return Pair(p, "su")
+                val pb = ProcessBuilder("su")
+                pb.redirectErrorStream(true)
+                pb.directory(sdcardDir)  // Root 权限下 /sdcard 更方便用户操作
+                val p = pb.start()
+                // 短暂等待让 su 有时间初始化或退出
+                Thread.sleep(200)
+                try {
+                    p.exitValue()
+                    // 能拿到 exitValue 说明 su 已退出（权限被拒绝或不存在）
+                    Logger.i("TerminalManager: su 进程秒退，尝试 Shizuku...")
+                } catch (e: IllegalThreadStateException) {
+                    // 抛出异常说明进程仍在运行 → su 启动成功！
+                    Logger.i("TerminalManager: Root Shell (su) 启动成功")
+                    return Pair(p, "su")
+                }
+            } catch (e: Exception) {
+                Logger.i("TerminalManager: su 不可用 (${e.message})，尝试 Shizuku...")
             }
-        } catch (e: Exception) {
-            Logger.i("TerminalManager: su 不可用 (${e.message})，尝试 Shizuku...")
+
+            // ── 策略 2：尝试 Shizuku (ADB Shell) ──────────────────────
+            try {
+                if (isShizukuAvailableForTerminal()) {
+                    @Suppress("DEPRECATION")
+                    val method = rikka.shizuku.Shizuku::class.java.getDeclaredMethod(
+                        "newProcess",
+                        Array<String>::class.java,
+                        Array<String>::class.java,
+                        String::class.java
+                    )
+                    method.isAccessible = true
+                    // Shizuku.newProcess 第三个参数是工作目录路径
+                    val p = method.invoke(
+                        null,
+                        arrayOf("sh"),
+                        null,
+                        sdcardDir.absolutePath
+                    ) as Process
+                    Logger.i("TerminalManager: Shizuku Shell 启动成功")
+                    return Pair(p, "shizuku")
+                }
+            } catch (e: Exception) {
+                Logger.e("TerminalManager: Shizuku Shell 启动失败", e)
+            }
+        } else {
+            Logger.i("TerminalManager: rootMode=false，跳过 su/Shizuku 提权尝试")
         }
 
-        // ── 策略 2：尝试 Shizuku (ADB Shell) ──────────────────────
-        try {
-            if (isShizukuAvailableForTerminal()) {
-                @Suppress("DEPRECATION")
-                val method = rikka.shizuku.Shizuku::class.java.getDeclaredMethod(
-                    "newProcess",
-                    Array<String>::class.java,
-                    Array<String>::class.java,
-                    String::class.java
-                )
-                method.isAccessible = true
-                // Shizuku.newProcess 第三个参数是工作目录路径
-                val p = method.invoke(
-                    null,
-                    arrayOf("sh"),
-                    null,
-                    sdcardDir.absolutePath
-                ) as Process
-                Logger.i("TerminalManager: Shizuku Shell 启动成功")
-                return Pair(p, "shizuku")
-            }
-        } catch (e: Exception) {
-            Logger.e("TerminalManager: Shizuku Shell 启动失败", e)
-        }
-
-        // ── 策略 3：回退到普通 sh ──────────────────────────────────
+        // ── 普通 sh（rootMode=false 或提权全部失败的回退）──────────────
         Logger.i("TerminalManager: 使用普通 sh（权限受限于应用沙箱）")
         val pb = ProcessBuilder("/system/bin/sh")
         pb.redirectErrorStream(true)
