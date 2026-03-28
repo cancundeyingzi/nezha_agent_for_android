@@ -1,5 +1,6 @@
 R_DEF: Internal format may change without notice
 local
+raw liquid_glass_shader
 string accessibility_desc
 string app_name
 style Theme.NezhaAgent

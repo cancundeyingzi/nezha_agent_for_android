@@ -162,6 +162,7 @@ layout notification_template_custom_big
 layout notification_template_icon_group
 layout notification_template_part_chronometer
 layout notification_template_part_time
+raw liquid_glass_shader
 string accessibility_desc
 string androidx_startup
 string app_name
