@@ -617,14 +617,16 @@ class SystemStateCollector(private val context: Context) {
     private fun readProcessCount(isRootMode: Boolean): Long {
         return if (isRootMode) {
             val output = RootShell.executeFirstLine("ps -A 2>/dev/null | wc -l")
-            val total = output?.trim()?.toLongOrNull() ?: 0L
-            // ps -A 输出包含标题行，减 1 得到实际进程数
-            (total - 1L).coerceAtLeast(0L).also { count ->
-                if (count == 0L && output == null) {
-                    // RootShell 失败，回退到 /proc 枚举法
-                    return readProcessCountFromProc()
+            val total = output?.trim()?.toLongOrNull()
+            // ps -A 输出包含标题行，减 1 得到实际进程数。
+            // 若输出不可解析，或计算后为非正数（如 toybox 不支持 -A 时返回 0），回退到 /proc 枚举法。
+            if (total != null) {
+                val count = (total - 1L).coerceAtLeast(0L)
+                if (count > 0L) {
+                    return count
                 }
             }
+            readProcessCountFromProc()
         } else {
             readProcessCountFromProc()
         }
