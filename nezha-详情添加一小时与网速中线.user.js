@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Nezha Detail Enhancer: 1 小时 + 网速中线
-// @namespace    https://ab.example.com/
-// @version      0.1.0
-// @description  为 Nezha 详情页增加“1 小时”伪历史视图，并补齐网速图中间刻度线。
-// @match        https://ab.example.com/server/*
+// @name         Nezha Detail Enhancer: 1 小时 + 网速中线 + 在线月卡
+// @namespace    https://nz.ccdyz.top/
+// @version      0.2.0
+// @description  为 Nezha 详情页增加“1 小时”伪历史视图、网速图中间刻度线，并在“在线”页增加 1 年 / 3 年 / 10 年周期（大周期按月汇总）。
+// @match        https://nz.ccdyz.top/*
 // @run-at       document-start
 // @grant        none
 // ==/UserScript==
@@ -12,12 +12,31 @@
   "use strict";
 
   const HOUR_MS = 60 * 60 * 1000;
+  const DAY_MS = 24 * 60 * 60 * 1000;
   const ENHANCE_ATTR = "data-nezha-detail-enhancer";
   const HOUR_TAB_ATTR = "data-nezha-hour-tab";
   const MIDLINE_ATTR = "data-nezha-net-midline";
   const MIDLABEL_ATTR = "data-nezha-net-midlabel";
+  const ONLINE_DAYS_ATTR = "data-nezha-online-days";
+  const ONLINE_ACTIVE_ATTR = "data-nezha-online-active";
+  const ONLINE_CARRIER_ATTR = "data-nezha-online-carrier";
+  const ONLINE_LOCKED_ATTR = "data-nezha-online-locked";
+  const MONTH_GRID_ATTR = "data-nezha-online-month-grid";
   const NATIVE_PERIOD_LABELS = ["实时", "1 天", "7 天", "30 天"];
   const HOUR_LABEL = "1 小时";
+
+  // 在线页原生只有 1 / 7 / 30 天；这里追加长周期，单位仍是“天”。
+  const ONLINE_NATIVE_LABELS = { "1 天": 1, "7 天": 7, "30 天": 30 };
+  const ONLINE_OPTIONS = [
+    { days: 365, label: "1 年" },
+    { days: 1095, label: "3 年" },
+    { days: 3650, label: "10 年" }
+  ];
+
+  // 超过该天数改用“月卡”展示，并把交给 React 的明细截断，避免渲染上千个日卡。
+  const ONLINE_MONTH_THRESHOLD = 60;
+  const ONLINE_DETAIL_DAYS = 30;
+
   const DEBUG = false;
 
   const state = {
@@ -26,7 +45,18 @@
     enhanceFrame: 0,
     clickListenerInstalled: false,
     observerStarted: false,
-    fetchPatched: false
+    fetchPatched: false,
+
+    // 在线页自定义周期（365 / 1095 / 3650），null 表示使用原生周期
+    onlineDays: null,
+    // 为触发 React 重新请求而点击的原生 tab，只能是 1 或 7
+    onlineCarrier: null,
+    onlineMaxDays: null,
+    onlineLocked: false,
+    onlineServerId: null,
+    onlineData: null,
+    monthRenderedFor: 0,
+    syntheticClick: false
   };
 
   const log = (...args) => {
@@ -48,9 +78,41 @@
     const originalFetch = window.fetch.bind(window);
 
     window.fetch = async function enhancedFetch(input, init) {
+      // 在线历史：自定义长周期需要改写 days 参数（后端上限 3650，超过后台保留天数会被裁剪）
+      const onlineUrl = resolveOnlineHistoryUrl(input);
+      if (onlineUrl && state.onlineDays) {
+        const targetId = getServerIdFromUrl(onlineUrl);
+
+        // 已经切到另一台服务器：丢弃上一个节点的自定义周期，按原生请求走
+        if (
+          targetId !== null &&
+          state.onlineServerId !== null &&
+          targetId !== state.onlineServerId
+        ) {
+          resetOnlineState();
+          return originalFetch(input, init);
+        }
+
+        try {
+          const rewritten = new URL(onlineUrl.toString());
+          rewritten.searchParams.set("days", String(state.onlineDays));
+          const response = await originalFetch(rewritten.toString(), init);
+          return await buildOnlineHistoryResponse(response);
+        } catch (error) {
+          warn("获取自定义在线周期失败，已回退原始请求。", error);
+          return originalFetch(input, init);
+        }
+      }
+
       const response = await originalFetch(input, init);
 
       try {
+        if (onlineUrl) {
+          rememberOnlineServerId(onlineUrl);
+          // 原生周期同样要记录，否则从长周期切回 30 天时月卡不会撤掉
+          return await buildOnlineHistoryResponse(response);
+        }
+
         if (!state.hourMode) return response;
 
         const requestUrl = getRequestUrl(input);
@@ -98,6 +160,33 @@
     );
   }
 
+  function resolveOnlineHistoryUrl(input) {
+    const url = getRequestUrl(input);
+    if (!url || url.origin !== window.location.origin) return null;
+    if (!/^\/api\/v1\/server\/\d+\/online-history$/.test(url.pathname)) return null;
+
+    const currentId = getServerIdFromPath();
+    const targetId = getServerIdFromUrl(url);
+    if (currentId !== null && targetId !== null && currentId !== targetId) return null;
+
+    return url;
+  }
+
+  function getServerIdFromUrl(url) {
+    const match = String(url && url.pathname).match(/^\/api\/v1\/server\/(\d+)\//);
+    return match ? Number(match[1]) : null;
+  }
+
+  function getServerIdFromPath() {
+    const match = String(window.location.pathname).match(/^\/server\/(\d+)/);
+    return match ? Number(match[1]) : null;
+  }
+
+  function rememberOnlineServerId(url) {
+    const id = getServerIdFromUrl(url);
+    if (id !== null) state.onlineServerId = id;
+  }
+
   async function buildFilteredHourResponse(response) {
     const data = await response.clone().json();
     const points = data && data.data && data.data.data_points;
@@ -133,6 +222,85 @@
     });
   }
 
+  /**
+   * 在线历史的响应处理：
+   * 1) 记录完整 daily（月卡要按自然月聚合，必须用全量数据）；
+   * 2) 大周期把 daily / periods 截断到最近 30 天再交给 React，避免上千个日卡；
+   * 3) 记录 max_days，后台保留天数不足时把按钮标灰。
+   */
+  async function buildOnlineHistoryResponse(response) {
+    const payload = await response.clone().json().catch(() => null);
+
+    if (!payload) return response;
+
+    if (payload.error) {
+      const message = String(payload.error);
+      if (message.includes("only 1d") || /unauthorized/i.test(message)) {
+        state.onlineLocked = true;
+        state.onlineDays = null;
+        state.onlineCarrier = null;
+      }
+      scheduleEnhance();
+      return response;
+    }
+
+    const data = payload.data;
+    if (!data || !Array.isArray(data.daily)) return response;
+
+    const days = Number(data.days) || 0;
+    const maxDays = Number(data.max_days);
+
+    // 后台把窗口裁剪到 max_days：以它为准，超出范围的按钮标灰并说明原因
+    if (Number.isFinite(maxDays) && maxDays > 0) {
+      state.onlineMaxDays = maxDays;
+    } else if (days > 0) {
+      state.onlineMaxDays = Math.max(days, state.onlineMaxDays || 0);
+    }
+    state.onlineLocked = false;
+
+    const windowStart = Date.parse(data.window_start);
+    const windowEnd = Date.parse(data.window_end);
+
+    state.onlineData = {
+      days: days,
+      maxDays: state.onlineMaxDays,
+      windowStart: Number.isFinite(windowStart) ? windowStart : 0,
+      windowEnd: Number.isFinite(windowEnd) ? windowEnd : 0,
+      tzOffset: Number(data.tz_offset) || 0,
+      daily: data.daily.map((item) => ({
+        date: String((item && item.date) || ""),
+        seconds: Number(item && item.online_seconds) || 0
+      })),
+      monthKey: Date.now()
+    };
+    state.monthRenderedFor = 0;
+
+    if (days > ONLINE_MONTH_THRESHOLD) {
+      data.daily = data.daily.slice(-ONLINE_DETAIL_DAYS);
+
+      if (Array.isArray(data.periods) && Number.isFinite(windowEnd)) {
+        const cutoff = windowEnd - ONLINE_DETAIL_DAYS * DAY_MS;
+        data.periods = data.periods.filter((period) => {
+          const end = Date.parse((period && (period.end || period.start)) || "");
+          return Number.isFinite(end) && end >= cutoff;
+        });
+      }
+    }
+
+    const headers = new Headers(response.headers);
+    headers.set("content-type", "application/json; charset=utf-8");
+    headers.delete("content-length");
+    headers.delete("content-encoding");
+
+    scheduleEnhance();
+
+    return new Response(JSON.stringify(payload), {
+      status: response.status,
+      statusText: response.statusText,
+      headers: headers
+    });
+  }
+
   function ensureStyles() {
     if (document.getElementById("nezha-detail-enhancer-style")) return;
 
@@ -151,6 +319,20 @@
       "}\n" +
       "\n[" + HOUR_TAB_ATTR + "][data-nezha-hour-active=\"false\"]:hover {\n" +
       "  color: hsl(var(--foreground)) !important;\n" +
+      "}\n" +
+      "\n[" + ONLINE_DAYS_ATTR + "] {\n" +
+      "  user-select: none;\n" +
+      "}\n" +
+      "\n[" + ONLINE_DAYS_ATTR + "][" + ONLINE_ACTIVE_ATTR + "=\"true\"] {\n" +
+      "  color: hsl(var(--foreground)) !important;\n" +
+      "}\n" +
+      "\n[" + ONLINE_CARRIER_ATTR + "=\"true\"] {\n" +
+      "  color: hsl(var(--muted-foreground)) !important;\n" +
+      "}\n" +
+      "\n[" + ONLINE_DAYS_ATTR + "][" + ONLINE_LOCKED_ATTR + "=\"true\"] {\n" +
+      "  cursor: not-allowed !important;\n" +
+      "  opacity: 0.4;\n" +
+      "  filter: grayscale(1);\n" +
       "}\n";
 
     (document.head || document.documentElement).appendChild(style);
@@ -162,9 +344,35 @@
     document.addEventListener(
       "click",
       (event) => {
-        const periodButton = event.target && event.target.closest
-          ? event.target.closest("div[class*='rounded-full']")
-          : null;
+        const target = event.target;
+        if (!target || !target.closest) return;
+
+        // 1) 在线页：脚本注入的 1 年 / 3 年 / 10 年
+        const customDay = target.closest("[" + ONLINE_DAYS_ATTR + "]");
+        if (customDay) {
+          event.preventDefault();
+          event.stopPropagation();
+
+          if (customDay.getAttribute(ONLINE_LOCKED_ATTR) === "true") return;
+
+          activateOnlineCustomDays(Number(customDay.getAttribute(ONLINE_DAYS_ATTR)));
+          return;
+        }
+
+        // 2) 在线页：原生 1 / 7 / 30 天
+        const onlineNativeDay = target.closest(
+          '[data-testid="days-selector"] > div:not([' + ONLINE_DAYS_ATTR + "])"
+        );
+        if (onlineNativeDay) {
+          if (state.syntheticClick) return;
+          handleNativeOnlineDayClick(event, onlineNativeDay);
+          return;
+        }
+
+        const periodButton =
+          target.closest && target.closest("div[class*='rounded-full']")
+            ? target.closest("div[class*='rounded-full']")
+            : null;
 
         if (!periodButton) return;
 
@@ -196,6 +404,470 @@
 
     state.clickListenerInstalled = true;
   }
+
+  /* ------------------------------------------------------------------ *
+   * 在线页长周期
+   * ------------------------------------------------------------------ */
+
+  function findOnlineDaysSelector() {
+    const byTestId = document.querySelector('[data-testid="days-selector"]');
+    if (byTestId) return byTestId;
+
+    const candidates = Array.from(document.querySelectorAll("div[class*='rounded-full']"));
+    return (
+      candidates.find((element) => {
+        const className = String(element.getAttribute("class") || "");
+        if (!className.includes("bg-muted")) return false;
+
+        const text = normalizeText(element.textContent);
+        return (
+          text.includes("1 天") &&
+          text.includes("7 天") &&
+          text.includes("30 天") &&
+          !text.includes("实时")
+        );
+      }) || null
+    );
+  }
+
+  function findOnlineNativeOptions(container) {
+    const map = new Map();
+    if (!container) return map;
+
+    Array.from(container.children).forEach((element) => {
+      if (!element || element.nodeType !== 1) return;
+      if (element.hasAttribute(ONLINE_DAYS_ATTR)) return;
+
+      const days = ONLINE_NATIVE_LABELS[normalizeText(element.textContent)];
+      if (days) map.set(days, element);
+    });
+
+    return map;
+  }
+
+  function isDisabledPeriodButton(button) {
+    const className = String(button.getAttribute("class") || "");
+    return className.includes("cursor-not-allowed") || className.includes("opacity-40");
+  }
+
+  function findActiveOnlineNativeDays(container) {
+    const natives = findOnlineNativeOptions(container);
+
+    for (const [days, button] of natives) {
+      if (button.classList.contains("text-foreground")) return days;
+    }
+
+    return null;
+  }
+
+  function ensureOnlineDayButtons() {
+    const container = findOnlineDaysSelector();
+    if (!container) return;
+
+    const natives = findOnlineNativeOptions(container);
+    const template = natives.get(30) || natives.get(7) || natives.get(1);
+    if (!template) return;
+
+    ONLINE_OPTIONS.forEach((option) => {
+      let button = container.querySelector(
+        "[" + ONLINE_DAYS_ATTR + '="' + option.days + '"]'
+      );
+
+      if (!button) {
+        button = template.cloneNode(true);
+        button.setAttribute(ONLINE_DAYS_ATTR, String(option.days));
+        button.setAttribute(ENHANCE_ATTR, "online-days");
+        button.removeAttribute("aria-disabled");
+        button.className = buildOnlineButtonClass(template.getAttribute("class"));
+
+        const label = button.querySelector("p, span");
+        if (label) {
+          label.textContent = option.label;
+        } else {
+          button.textContent = option.label;
+        }
+
+        container.appendChild(button);
+      }
+
+      updateOnlineButtonState(button, option);
+    });
+  }
+
+  function buildOnlineButtonClass(rawClass) {
+    const classes = String(rawClass || "")
+      .split(/\s+/)
+      .filter(Boolean)
+      .filter(
+        (token) =>
+          ![
+            "cursor-not-allowed",
+            "opacity-40",
+            "grayscale",
+            "text-foreground",
+            "text-muted-foreground",
+            "hover:text-foreground"
+          ].includes(token)
+      );
+
+    classes.push("cursor-pointer", "text-muted-foreground", "hover:text-foreground");
+    return classes.join(" ");
+  }
+
+  function updateOnlineButtonState(button, option) {
+    const locked =
+      state.onlineLocked ||
+      (Number.isFinite(state.onlineMaxDays) && option.days > state.onlineMaxDays);
+
+    button.setAttribute(ONLINE_ACTIVE_ATTR, state.onlineDays === option.days ? "true" : "false");
+    button.setAttribute(ONLINE_LOCKED_ATTR, locked ? "true" : "false");
+
+    if (locked) {
+      button.title = state.onlineLocked
+        ? "需要登录后才能查看更长周期"
+        : "后台在线统计仅保留 " + state.onlineMaxDays + " 天";
+    } else {
+      button.title = "查看最近 " + option.days + " 天";
+    }
+  }
+
+  function activateOnlineCustomDays(days) {
+    const option = ONLINE_OPTIONS.find((item) => item.days === days);
+    if (!option) return;
+
+    const container = findOnlineDaysSelector();
+    if (!container) return;
+
+    const natives = findOnlineNativeOptions(container);
+    const current = findActiveOnlineNativeDays(container);
+
+    // 载体必须是“未被锁定”的原生项，否则 React 不会 setState，也就不会发请求
+    const carrier = [1, 7, 30].find(
+      (candidate) =>
+        candidate !== current &&
+        natives.has(candidate) &&
+        !isDisabledPeriodButton(natives.get(candidate))
+    );
+
+    if (!carrier) {
+      state.onlineLocked = true;
+      scheduleEnhance();
+      return;
+    }
+
+    state.onlineDays = days;
+    state.onlineCarrier = carrier;
+
+    applyOnlineDaysVisual();
+    clickOnlineNativeDay(carrier);
+
+    scheduleEnhance();
+    scheduleDelayedEnhance();
+  }
+
+  function clickOnlineNativeDay(days) {
+    const container = findOnlineDaysSelector();
+    if (!container) return false;
+
+    const button = findOnlineNativeOptions(container).get(days);
+    if (!button) return false;
+
+    state.suppressNativeReset = true;
+    state.syntheticClick = true;
+
+    button.dispatchEvent(
+      new MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+        view: window
+      })
+    );
+
+    state.syntheticClick = false;
+
+    window.setTimeout(() => {
+      state.suppressNativeReset = false;
+    }, 0);
+
+    return true;
+  }
+
+  function handleNativeOnlineDayClick(event, button) {
+    const days = ONLINE_NATIVE_LABELS[normalizeText(button.textContent)];
+    if (!days) return;
+
+    if (!state.onlineDays) return;
+
+    const carrier = state.onlineCarrier;
+    state.onlineDays = null;
+    state.onlineCarrier = null;
+    applyOnlineDaysVisual();
+
+    // 点的正是“载体”时，React 的 selectedDays 没变，不会重新请求，
+    // 必须借另一个值把请求逼出来，再切回目标值。
+    if (days === carrier) {
+      event.preventDefault();
+      event.stopPropagation();
+      forceOnlineNativeDay(days);
+    }
+  }
+
+  async function forceOnlineNativeDay(target) {
+    const bridge = target === 1 ? 7 : 1;
+
+    if (!clickOnlineNativeDay(bridge)) return;
+
+    await sleep(90);
+    clickOnlineNativeDay(target);
+  }
+
+  function applyOnlineDaysVisual() {
+    const container = findOnlineDaysSelector();
+    if (!container) return;
+
+    const natives = findOnlineNativeOptions(container);
+    natives.forEach((button, days) => {
+      if (state.onlineDays && days === state.onlineCarrier) {
+        button.setAttribute(ONLINE_CARRIER_ATTR, "true");
+      } else {
+        button.removeAttribute(ONLINE_CARRIER_ATTR);
+      }
+    });
+
+    ONLINE_OPTIONS.forEach((option) => {
+      const button = container.querySelector(
+        "[" + ONLINE_DAYS_ATTR + '="' + option.days + '"]'
+      );
+      if (button) updateOnlineButtonState(button, option);
+    });
+
+    if (!state.onlineDays) return;
+
+    const active = container.querySelector(
+      "[" + ONLINE_DAYS_ATTR + '="' + state.onlineDays + '"]'
+    );
+
+    if (active) {
+      moveActiveIndicator(container, active);
+    }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 大周期月卡
+   * ------------------------------------------------------------------ */
+
+  function findOnlineDailyCard() {
+    const titles = Array.from(document.querySelectorAll("p"));
+
+    const title = titles.find((element) => {
+      const text = normalizeText(element.textContent);
+      return text === "每日在线时长" || text === "每月在线时长";
+    });
+
+    if (!title) return null;
+
+    const headerRow = title.parentElement;
+    if (!headerRow) return null;
+
+    // 月卡容器会插在标题行与日卡之间，这里必须跳过它继续往后找
+    let grid = headerRow.nextElementSibling;
+    while (grid) {
+      const className = String(grid.getAttribute("class") || "");
+      if (grid.hasAttribute(MONTH_GRID_ATTR)) {
+        grid = grid.nextElementSibling;
+        continue;
+      }
+      if (className.includes("grid")) break;
+      grid = grid.nextElementSibling;
+    }
+
+    if (!grid) return null;
+
+    return { title: title, headerRow: headerRow, grid: grid };
+  }
+
+  function renderOnlineMonthGrid() {
+    const card = findOnlineDailyCard();
+    if (!card) return;
+
+    const data = state.onlineData;
+    const useMonth = Boolean(data && data.days > ONLINE_MONTH_THRESHOLD);
+    const grid = card.grid;
+
+    if (!useMonth) {
+      if (grid.style.display === "none") grid.style.display = "";
+      if (normalizeText(card.title.textContent) === "每月在线时长") {
+        card.title.textContent = "每日在线时长";
+      }
+
+      const stale = grid.parentElement
+        ? grid.parentElement.querySelector("[" + MONTH_GRID_ATTR + "]")
+        : null;
+      if (stale) stale.remove();
+
+      state.monthRenderedFor = 0;
+      return;
+    }
+
+    if (grid.style.display !== "none") grid.style.display = "none";
+    if (normalizeText(card.title.textContent) !== "每月在线时长") {
+      card.title.textContent = "每月在线时长";
+    }
+
+    const existing = grid.parentElement
+      ? grid.parentElement.querySelector("[" + MONTH_GRID_ATTR + "]")
+      : null;
+
+    if (existing && state.monthRenderedFor === data.monthKey) return;
+
+    const container = existing || document.createElement("div");
+    container.setAttribute(MONTH_GRID_ATTR, "true");
+    container.className = "mt-3 flex flex-col gap-2";
+    container.textContent = "";
+
+    const note = document.createElement("div");
+    note.className = "text-[11px] leading-4 text-muted-foreground tabular-nums";
+    note.textContent =
+      "按自然月汇总 · 实际窗口 " +
+      data.days +
+      " 天" +
+      (Number.isFinite(data.maxDays) ? "（后台保留上限 " + data.maxDays + " 天）" : "") +
+      " · 每日明细仅保留最近 " +
+      Math.min(ONLINE_DETAIL_DAYS, data.days) +
+      " 天";
+    container.appendChild(note);
+
+    const rows = buildMonthRows(data);
+
+    if (rows.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "py-6 text-center text-sm text-muted-foreground";
+      empty.textContent = "暂无在线记录";
+      container.appendChild(empty);
+    } else {
+      const list = document.createElement("div");
+      list.className = "grid grid-cols-1 gap-2 md:grid-cols-2";
+
+      rows.forEach((row) => {
+        list.appendChild(buildMonthCard(row));
+      });
+
+      container.appendChild(list);
+    }
+
+    if (!existing && grid.parentElement) {
+      grid.parentElement.insertBefore(container, grid);
+    }
+
+    state.monthRenderedFor = data.monthKey;
+  }
+
+  function buildMonthRows(data) {
+    const groups = new Map();
+
+    data.daily.forEach((item) => {
+      const key = String(item.date || "").slice(0, 7);
+      if (!/^\d{4}-\d{2}$/.test(key)) return;
+
+      const group = groups.get(key) || { key: key, seconds: 0, days: 0 };
+      group.seconds += item.seconds;
+      group.days += 1;
+      groups.set(key, group);
+    });
+
+    const windowStartWall = data.windowStart + data.tzOffset * 1000;
+    const windowEndWall = data.windowEnd + data.tzOffset * 1000;
+    const rows = [];
+
+    groups.forEach((group) => {
+      const parts = group.key.split("-");
+      const year = Number(parts[0]);
+      const month = Number(parts[1]);
+
+      const monthStart = Date.UTC(year, month - 1, 1);
+      const monthEnd = Date.UTC(year, month, 1);
+
+      const overlap =
+        Math.max(
+          0,
+          Math.min(monthEnd, windowEndWall) - Math.max(monthStart, windowStartWall)
+        ) / 1000;
+
+      rows.push({
+        key: group.key,
+        seconds: group.seconds,
+        days: group.days,
+        total: overlap,
+        rate: overlap > 0 ? (group.seconds / overlap) * 100 : 0
+      });
+    });
+
+    return rows.sort((a, b) => (a.key < b.key ? 1 : a.key > b.key ? -1 : 0));
+  }
+
+  function buildMonthCard(row) {
+    const card = document.createElement("div");
+    card.className =
+      "flex min-w-0 flex-col gap-2.5 rounded-lg bg-muted/40 px-2.5 py-2 dark:bg-muted/20";
+
+    const head = document.createElement("div");
+    head.className = "flex items-baseline justify-between gap-2 text-xs";
+
+    const month = document.createElement("span");
+    month.className = "text-foreground tabular-nums";
+    month.textContent = row.key;
+
+    const duration = document.createElement("span");
+    duration.className = "text-muted-foreground tabular-nums";
+    duration.textContent = "在线 " + formatOnlineDuration(row.seconds);
+
+    head.appendChild(month);
+    head.appendChild(duration);
+
+    const bar = document.createElement("div");
+    bar.className =
+      "relative h-2 overflow-hidden rounded-full bg-stone-200/70 dark:bg-stone-700";
+
+    const fill = document.createElement("div");
+    fill.className = "h-full rounded-full bg-green-500/90";
+    fill.style.width = Math.min(100, Math.max(0, row.rate)).toFixed(1) + "%";
+
+    bar.appendChild(fill);
+
+    const foot = document.createElement("div");
+    foot.className =
+      "flex justify-between text-[9px] leading-none text-muted-foreground tabular-nums";
+
+    const rate = document.createElement("span");
+    rate.textContent = "在线率 " + row.rate.toFixed(1) + "%";
+
+    const coverage = document.createElement("span");
+    coverage.textContent = row.days + " 天";
+
+    foot.appendChild(rate);
+    foot.appendChild(coverage);
+
+    card.appendChild(head);
+    card.appendChild(bar);
+    card.appendChild(foot);
+
+    return card;
+  }
+
+  function formatOnlineDuration(seconds) {
+    const total = Math.max(0, Math.round(Number(seconds) || 0));
+    const days = Math.floor(total / 86400);
+    const hours = Math.floor((total % 86400) / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+
+    if (days > 0) return hours > 0 ? days + " 天 " + hours + " 小时" : days + " 天";
+    if (hours > 0) return minutes > 0 ? hours + " 小时 " + minutes + " 分" : hours + " 小时";
+    return minutes + " 分";
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 详情页 1 小时 / 网速中线（原有逻辑）
+   * ------------------------------------------------------------------ */
 
   async function activateNativeDayPeriod() {
     state.hourMode = false;
@@ -245,11 +917,6 @@
     return true;
   }
 
-  function isDisabledPeriodButton(button) {
-    const className = String(button.getAttribute("class") || "");
-    return className.includes("cursor-not-allowed") || className.includes("opacity-40");
-  }
-
   function scheduleDelayedEnhance() {
     [60, 180, 450, 900, 1500].forEach((delay) => {
       window.setTimeout(scheduleEnhance, delay);
@@ -272,8 +939,29 @@
 
   function enhancePage() {
     ensureStyles();
+    syncOnlineContext();
     ensureHourTab();
     patchNetworkMidline();
+    ensureOnlineDayButtons();
+    applyOnlineDaysVisual();
+    renderOnlineMonthGrid();
+  }
+
+  function syncOnlineContext() {
+    const id = getServerIdFromPath();
+
+    if (id !== state.onlineServerId) {
+      state.onlineServerId = id;
+      resetOnlineState();
+    }
+  }
+
+  function resetOnlineState() {
+    state.onlineDays = null;
+    state.onlineCarrier = null;
+    state.onlineData = null;
+    state.monthRenderedFor = 0;
+    state.onlineLocked = false;
   }
 
   function findPeriodGroup() {
@@ -281,7 +969,10 @@
       .filter((element) => {
         const text = normalizeText(element.textContent);
         const className = String(element.getAttribute("class") || "");
-        return className.includes("bg-muted") && NATIVE_PERIOD_LABELS.every((label) => text.includes(label));
+        return (
+          className.includes("bg-muted") &&
+          NATIVE_PERIOD_LABELS.every((label) => text.includes(label))
+        );
       })
       .sort((a, b) => normalizeText(a.textContent).length - normalizeText(b.textContent).length);
 
@@ -293,11 +984,14 @@
         const matches = Array.from(container.querySelectorAll("div"))
           .filter((element) => !element.hasAttribute(HOUR_TAB_ATTR))
           .filter((element) => normalizeText(element.textContent) === label)
-          .filter((element) => String(element.getAttribute("class") || "").includes("rounded-full"));
+          .filter((element) =>
+            String(element.getAttribute("class") || "").includes("rounded-full")
+          );
 
         const button =
-          matches.find((element) => String(element.getAttribute("class") || "").includes("px-3")) ||
-          matches[0];
+          matches.find((element) =>
+            String(element.getAttribute("class") || "").includes("px-3")
+          ) || matches[0];
 
         if (button) {
           buttons.set(label, button);
@@ -390,7 +1084,8 @@
     for (const [label, button] of group.buttons) {
       const className = String(button.getAttribute("class") || "");
       const isMuted = className.includes("text-muted-foreground");
-      const isDisabled = className.includes("cursor-not-allowed") || className.includes("opacity-40");
+      const isDisabled =
+        className.includes("cursor-not-allowed") || className.includes("opacity-40");
 
       if (!isMuted && !isDisabled) return label;
     }
@@ -484,7 +1179,9 @@
   }
 
   function getNativeSpeedTickTexts(svg) {
-    return Array.from(svg.querySelectorAll(".recharts-yAxis text, text.recharts-cartesian-axis-tick-value"))
+    return Array.from(
+      svg.querySelectorAll(".recharts-yAxis text, text.recharts-cartesian-axis-tick-value")
+    )
       .filter((element) => !element.hasAttribute(MIDLABEL_ATTR))
       .filter((element) => /M\/s$/.test(normalizeText(element.textContent)));
   }
@@ -517,7 +1214,9 @@
       }
     }
 
-    const width = readSvgNumber(svg, "width") || (svg.viewBox && svg.viewBox.baseVal && svg.viewBox.baseVal.width);
+    const width =
+      readSvgNumber(svg, "width") ||
+      (svg.viewBox && svg.viewBox.baseVal && svg.viewBox.baseVal.width);
     const left = readSvgNumber(topTick.element, "x") || 0;
 
     if (!width) return null;
@@ -576,7 +1275,10 @@
     if (!Number.isFinite(value)) return "";
     if (Math.abs(value) < 0.0001) return "0M/s";
 
-    const fixed = Math.abs(value) < 10 && Math.abs(value % 1) > 0.0001 ? value.toFixed(1) : value.toFixed(0);
+    const fixed =
+      Math.abs(value) < 10 && Math.abs(value % 1) > 0.0001
+        ? value.toFixed(1)
+        : value.toFixed(0);
     return fixed.replace(/\.0$/, "") + "M/s";
   }
 
