@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nezha Detail Enhancer: 1 小时 + 网速中线 + 在线月卡
 // @namespace    https://nz.ccdyz.top/
-// @version      0.2.0
+// @version      0.5.0
 // @description  为 Nezha 详情页增加“1 小时”伪历史视图、网速图中间刻度线，并在“在线”页增加 1 年 / 3 年 / 10 年周期（大周期按月汇总）。
 // @match        https://nz.ccdyz.top/*
 // @run-at       document-start
@@ -12,6 +12,9 @@
   "use strict";
 
   const HOUR_MS = 60 * 60 * 1000;
+  // 在“1 小时”请求中保留完整 1d 原始响应：切回“1 天”无需再次等待网络。
+  const DAY_CACHE_TTL_MS = 5 * 60 * 1000;
+  const DAY_CACHE_CAP = 40;
   const DAY_MS = 24 * 60 * 60 * 1000;
   const ENHANCE_ATTR = "data-nezha-detail-enhancer";
   const HOUR_TAB_ATTR = "data-nezha-hour-tab";
@@ -42,6 +45,18 @@
   const state = {
     hourMode: false,
     suppressNativeReset: false,
+    // 历史图切换：序列号用于取消尚未完成的旧切换
+    periodSwitchId: 0,
+    periodTarget: null,
+    periodServerId: null,
+    syntheticPeriodClick: false,
+    oneDayMetricsStarted: 0,
+    oneDayMetricsDelivered: 0,
+    dayRawCache: new Map(),
+    // 与 TanStack Query 的 1d 缓存对应的完整原始时间序列（不带一小时裁剪）。
+    dayQueryFullPoints: new Map(),
+    metricQueryClient: null,
+    dayRestoreUntil: 0,
     enhanceFrame: 0,
     clickListenerInstalled: false,
     observerStarted: false,
@@ -80,6 +95,25 @@
     window.fetch = async function enhancedFetch(input, init) {
       // 在线历史：自定义长周期需要改写 days 参数（后端上限 3650，超过后台保留天数会被裁剪）
       const onlineUrl = resolveOnlineHistoryUrl(input);
+      const metricsUrl = getRequestUrl(input);
+      const isOneDayMetrics = metricsUrl && shouldFilterMetricsResponse(metricsUrl) &&
+        (!init || !init.method || String(init.method).toUpperCase() === "GET") &&
+        (!input || !input.method || String(input.method).toUpperCase() === "GET");
+      const metricsKey = isOneDayMetrics ? metricsCacheKey(metricsUrl) : "";
+      if (isOneDayMetrics) {
+        state.oneDayMetricsStarted++;
+
+        // “一小时”显示的是裁剪后的 1d 数据，但完整数据已经在内存中。
+        // 切回“一天”时直接给 React 完整响应，避免因网络 / TSDB 延迟仍显示一小时。
+        if (!state.hourMode && (state.periodTarget === "day" || Date.now() < state.dayRestoreUntil)) {
+          const cached = readDayMetricsCache(metricsKey);
+          if (cached) {
+            state.oneDayMetricsDelivered++;
+            log("instant day cache hit", metricsKey);
+            return cachedResponse(cached);
+          }
+        }
+      }
       if (onlineUrl && state.onlineDays) {
         const targetId = getServerIdFromUrl(onlineUrl);
 
@@ -109,18 +143,21 @@
       try {
         if (onlineUrl) {
           rememberOnlineServerId(onlineUrl);
-          // 原生周期同样要记录，否则从长周期切回 30 天时月卡不会撤掉
           return await buildOnlineHistoryResponse(response);
         }
 
+        if (!isOneDayMetrics || !response.ok) return response;
+
+        // 无论 1 小时 / 1 天，都先缓存完整数据，绝不保存过滤后的响应。
+        // 过滤要以响应交付时的模式为准，防止在途旧请求覆盖新模式。
+        const rawPayload = await response.clone().json();
+        cacheFullDayMetrics(metricsKey, rawPayload, response);
+        state.oneDayMetricsDelivered++;
         if (!state.hourMode) return response;
 
-        const requestUrl = getRequestUrl(input);
-        if (!requestUrl || !shouldFilterMetricsResponse(requestUrl)) return response;
-
-        return await buildFilteredHourResponse(response);
+        return await buildFilteredHourResponse(response, rawPayload);
       } catch (error) {
-        warn("过滤 1 小时 metrics 数据失败，已回退原始响应。", error);
+        warn("处理 1d metrics 响应失败，已回退原始响应。", error);
         return response;
       }
     };
@@ -187,8 +224,57 @@
     if (id !== null) state.onlineServerId = id;
   }
 
-  async function buildFilteredHourResponse(response) {
-    const data = await response.clone().json();
+  function metricsCacheKey(url) {
+    const canonical = new URL(url.toString());
+    canonical.searchParams.sort();
+    return canonical.pathname + "?" + canonical.searchParams.toString();
+  }
+
+  function cacheFullDayMetrics(key, payload, response) {
+    if (!key || !payload || !payload.data || !Array.isArray(payload.data.data_points)) return;
+    const headers = new Headers(response.headers);
+    headers.set("content-type", "application/json; charset=utf-8");
+    headers.delete("content-length");
+    headers.delete("content-encoding");
+    // 与原响应隔离，之后只按模式生成新的响应，不允许修改缓存本身。
+    const item = {
+      body: JSON.stringify(payload),
+      headers: [...headers.entries()],
+      status: response.status,
+      statusText: response.statusText,
+      savedAt: Date.now()
+    };
+    state.dayRawCache.delete(key);
+    state.dayRawCache.set(key, item);
+    state.dayQueryFullPoints.set(key, payload.data.data_points);
+    while (state.dayRawCache.size > DAY_CACHE_CAP) {
+      const oldestKey = state.dayRawCache.keys().next().value;
+      state.dayRawCache.delete(oldestKey);
+      state.dayQueryFullPoints.delete(oldestKey);
+    }
+  }
+
+  function readDayMetricsCache(key) {
+    const item = state.dayRawCache.get(key);
+    if (!item) return null;
+    if (Date.now() - item.savedAt > DAY_CACHE_TTL_MS) {
+      state.dayRawCache.delete(key);
+      return null;
+    }
+    return item;
+  }
+
+  function cachedResponse(item) {
+    return new Response(item.body, {
+      status: item.status,
+      statusText: item.statusText,
+      headers: new Headers(item.headers)
+    });
+  }
+
+  async function buildFilteredHourResponse(response, sourcePayload) {
+    // clone：过滤一小时数据不会破坏原始缓存中的 24 小时数据。
+    const data = structuredClone(sourcePayload);
     const points = data && data.data && data.data.data_points;
 
     if (!Array.isArray(points) || points.length === 0) {
@@ -204,6 +290,8 @@
 
     const cutoff = latestTs - HOUR_MS;
     data.data.data_points = points.filter((point) => Number(point && point.ts) >= cutoff);
+    // 解析/序列化可能跨越模式切换，届时必须交付完整原始响应。
+    if (!state.hourMode) return response;
 
     const headers = new Headers(response.headers);
     headers.set("content-type", "application/json; charset=utf-8");
@@ -384,16 +472,25 @@
         }
 
         const label = normalizeText(periodButton.textContent);
-        if (NATIVE_PERIOD_LABELS.includes(label) && !state.suppressNativeReset) {
+        if (NATIVE_PERIOD_LABELS.includes(label)) {
+          // 自己发送的原生点击由切换流程控制，不能反过来取消自己。
+          if (state.syntheticPeriodClick || state.suppressNativeReset) return;
           if (isDisabledPeriodButton(periodButton)) return;
 
-          if (state.hourMode && label === "1 天") {
+          if (label === "1 天" && (state.hourMode || state.periodTarget === "hour")) {
             event.preventDefault();
             event.stopPropagation();
             activateNativeDayPeriod();
             return;
           }
 
+          // 用户手动改选其它原生周期时，取消所有在途的异步桥接动作。
+          state.periodSwitchId++;
+          state.periodTarget = null;
+          if (state.hourMode) {
+            // 离开一小时视图时，先修正 1d 的 Query 缓存。
+            restoreFullDayQueryCache();
+          }
           state.hourMode = false;
           scheduleEnhance();
           scheduleDelayedEnhance();
@@ -869,51 +966,296 @@
    * 详情页 1 小时 / 网速中线（原有逻辑）
    * ------------------------------------------------------------------ */
 
-  async function activateNativeDayPeriod() {
-    state.hourMode = false;
-    clickNativePeriod("实时");
-    await sleep(80);
-    clickNativePeriod("1 天");
-    scheduleEnhance();
-    scheduleDelayedEnhance();
+  /*
+   * 直接同步 TanStack Query 里的 1d 原始查询缓存。
+   *
+   * 该前端 useMetricHistory 的 key 为
+   * ["server-metrics", serverId, metric, "1d"]，staleTime=30_000。
+   * 旧版向 fetch 返回裁剪数据，Query 随之缓存只有一小时的数据；
+   * 仅模拟“实时 -> 1 天”并不能保证刷新这份仍然新鲜的查询缓存。
+   *
+   * 现在原生选中周期保持为 1d，切换 1 小时/1 天时直接对 Query 缓存
+   * setQueryData，React Query 通知订阅的图表更新。无需等待 React 桥接及
+   * 下一次 TSDB 请求。若目标页没有 QueryClient，才退回旧兼容流程。
+   */
+  function activateNativeDayPeriod() {
+    void switchMetricPeriodFast("day");
   }
 
-  async function activateHourPeriod() {
+  function activateHourPeriod() {
+    void switchMetricPeriodFast("hour");
+  }
+
+  function isQueryClient(candidate) {
+    return candidate && typeof candidate.getQueriesData === "function" &&
+      typeof candidate.setQueryData === "function" &&
+      typeof candidate.invalidateQueries === "function";
+  }
+
+  function findMetricQueryClient() {
+    if (isQueryClient(state.metricQueryClient)) return state.metricQueryClient;
+    const group = findPeriodGroup();
+    if (!group) return null;
+    const nodes = [group.buttons.get("1 天"), group.container].filter(Boolean);
+    for (const start of nodes) {
+      // React 把内部 Fiber 挂在真实 DOM 节点上；QueryClientProvider 是其祖先。
+      for (let element = start; element; element = element.parentElement) {
+        const reactFiberKeys = Object.keys(element).filter((k) =>
+          k.startsWith("__reactFiber$") || k.startsWith("__reactContainer$")
+        );
+        for (const fiberKey of reactFiberKeys) {
+          let fiber = element[fiberKey];
+          // __reactContainer$ 指向 HostRoot，可沿 child 找到 provider。
+          if (fiberKey.startsWith("__reactContainer$") && fiber && fiber.current) fiber = fiber.current;
+          let hops = 0;
+          while (fiber && hops++ < 150) {
+            for (const props of [fiber.memoizedProps, fiber.pendingProps]) {
+              if (!props) continue;
+              const candidate = props.client || props.value;
+              if (isQueryClient(candidate)) {
+                state.metricQueryClient = candidate;
+                log("located TanStack QueryClient through React Fiber");
+                return candidate;
+              }
+            }
+            fiber = fiber.return;
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  function metricKeyFor(serverId, metric) {
+    const url = new URL(`/api/v1/server/${serverId}/metrics`, window.location.origin);
+    url.searchParams.set("metric", metric);
+    url.searchParams.set("period", "1d");
+    return metricsCacheKey(url);
+  }
+
+  function slicePointsForHour(points) {
+    if (!Array.isArray(points) || points.length === 0) return points;
+    const latestTs = points.reduce((max, item) => {
+      const ts = Number(item && item.ts);
+      return Number.isFinite(ts) ? Math.max(max, ts) : max;
+    }, 0);
+    if (!latestTs) return points;
+    return points.filter((point) => Number(point && point.ts) >= latestTs - HOUR_MS);
+  }
+
+  function metricPointsEqual(left, right) {
+    if (left === right) return true;
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+    for (let i = 0; i < left.length; i++) {
+      if (left[i]?.ts !== right[i]?.ts || left[i]?.value !== right[i]?.value) return false;
+    }
+    return true;
+  }
+
+  function patchMetricQueryCache(mode, client = findMetricQueryClient()) {
+    const serverId = getServerIdFromPath();
+    if (!client || serverId === null) return { available: false, patched: 0, missing: 0 };
+
+    const entries = client.getQueriesData({ queryKey: ["server-metrics", serverId] });
+    let patched = 0;
+    let missing = 0;
+    for (const [queryKey, currentPoints] of entries) {
+      if (!Array.isArray(queryKey) || queryKey.length !== 4 || queryKey[3] !== "1d") continue;
+      if (!Array.isArray(currentPoints)) continue;
+
+      const cacheKey = metricKeyFor(serverId, queryKey[2]);
+      let fullPoints = state.dayQueryFullPoints.get(cacheKey);
+      if (!fullPoints && mode === "hour") {
+        // 1d 已从 Query 缓存命中、并未发起 fetch：当前 points 仍是完整数据。
+        fullPoints = currentPoints;
+        state.dayQueryFullPoints.set(cacheKey, fullPoints);
+      }
+      if (!fullPoints) {
+        missing++;
+        continue;
+      }
+      const expected = mode === "hour" ? slicePointsForHour(fullPoints) : fullPoints;
+      if (!metricPointsEqual(currentPoints, expected)) {
+        client.setQueryData(queryKey, expected);
+        patched++;
+      }
+    }
+    return { available: true, patched, missing };
+  }
+
+  function restoreFullDayQueryCache() {
+    const client = findMetricQueryClient();
+    if (!client) return false;
+    const result = patchMetricQueryCache("day", client);
+    if (result.missing) {
+      // 缺少完整原始值时，显式使查询过期，避免继续命中被截断的 30 秒缓存。
+      const serverId = getServerIdFromPath();
+      void client.invalidateQueries({ queryKey: ["server-metrics", serverId,], refetchType: "active" });
+    }
+    return true;
+  }
+
+  function scheduleCacheReconciliation(id, target) {
+    // 处理切换边缘同时结束的旧 fetch / React Query 写入。
+    [0, 40, 140, 450, 1000].forEach((ms) => {
+      window.setTimeout(() => {
+        if (state.periodSwitchId !== id || state.periodServerId !== getServerIdFromPath()) return;
+        if (target === "day" && !state.hourMode) patchMetricQueryCache("day");
+        if (target === "hour" && state.hourMode) patchMetricQueryCache("hour");
+      }, ms);
+    });
+  }
+
+  async function switchMetricPeriodFast(target) {
     const group = findPeriodGroup();
     if (!group) return;
-
-    const currentNativeLabel = findActiveNativeLabel(group);
-
-    if (currentNativeLabel === "1 天" && !state.hourMode) {
-      state.hourMode = false;
-      clickNativePeriod("实时");
-      await sleep(80);
+    const client = findMetricQueryClient();
+    if (!client) {
+      warn("尚未定位 React QueryClient，改用兼容切换流程。", target);
+      return fallbackSwitchHourDayPeriod(target);
     }
 
-    state.hourMode = true;
-    clickNativePeriod("1 天");
+    const id = ++state.periodSwitchId;
+    const wantHour = target === "hour";
+    state.periodTarget = target;
+    // 在修改 Query 缓存前设置模式，使后续并发 fetch 返回目标模式。
+    state.hourMode = wantHour;
+    state.dayRestoreUntil = wantHour ? 0 : Date.now() + 8000;
+
+    const result = patchMetricQueryCache(target, client);
+    log("direct query cache period change", { target, ...result });
+
+    // 如果用户本来在实时、7 天或 30 天，则只需点一次原生 1 天。
+    // 如果原生早已是 1 天，绝不额外桥接，更不会再等待下一次 fetch。
+    const currentNative = findActiveNativeLabel(group);
+    if (currentNative !== "1 天") clickNativePeriod("1 天");
+
+    if (!wantHour && result.missing) {
+      const serverId = getServerIdFromPath();
+      void client.invalidateQueries({ queryKey: ["server-metrics", serverId], refetchType: "active" });
+    }
+    scheduleCacheReconciliation(id, target);
     scheduleEnhance();
-    scheduleDelayedEnhance();
+    state.periodTarget = null;
+  }
+
+  // 旧版 React 或 QueryClient 不可访问时的保底逻辑，正常不经过这里。
+  async function fallbackSwitchHourDayPeriod(target) {
+    return switchHourDayPeriod(target);
+  }
+
+  function isCurrentPeriodSwitch(id) {
+    return state.periodSwitchId === id;
+  }
+
+  async function waitForNativePeriod(label, id, timeout = 1800) {
+    const started = performance.now();
+    while (isCurrentPeriodSwitch(id) && performance.now() - started < timeout) {
+      const group = findPeriodGroup();
+      if (group && findActiveNativeLabel(group) === label) return true;
+      await sleep(25);
+    }
+    return false;
+  }
+
+  async function waitForOneDayMetrics(previous, id, timeout = 1200) {
+    const started = performance.now();
+    while (isCurrentPeriodSwitch(id) && performance.now() - started < timeout) {
+      if (state.oneDayMetricsDelivered > previous) return true;
+      await sleep(30);
+    }
+    return false;
+  }
+
+  async function switchHourDayPeriod(target) {
+    const id = ++state.periodSwitchId;
+    state.periodTarget = target;
+    const wantHour = target === "hour";
+
+    // 切回整天时必须从这一刻起停止裁剪 1d 数据。
+    if (!wantHour) {
+      state.hourMode = false;
+      // 有些图表会在主请求结束后分批加载；继续短暂提供完整 1d 缓存。
+      state.dayRestoreUntil = Date.now() + 8000;
+    } else {
+      state.dayRestoreUntil = 0;
+    }
+
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (!isCurrentPeriodSwitch(id)) return;
+
+        let group = findPeriodGroup();
+        if (!group) {
+          await sleep(100);
+          group = findPeriodGroup();
+        }
+        if (!group || !group.buttons.has("1 天")) return;
+
+        const currentNative = findActiveNativeLabel(group);
+
+        // 如果原生已选 1 天，先切到实时，使 React 接受后续 1d 点击为状态变化。
+        // 第二轮无论如何都强制走一次桥接，避免出现缓存数据未被刷新。
+        if (currentNative === "1 天" || attempt > 0) {
+          if (!clickNativePeriod("实时")) return;
+          const bridged = await waitForNativePeriod("实时", id);
+          if (!isCurrentPeriodSwitch(id)) return;
+          if (!bridged) {
+            warn("未确认 React 已切换到实时，停止本次操作以避免状态错乱。");
+            return;
+          }
+        }
+
+        // 给 React 一次绘制机会；这不是用时间猜 React 是否提交。
+        await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+        if (!isCurrentPeriodSwitch(id)) return;
+
+        // 最终点击 1 天之前设置模式，确保请求回包可按目标模式处理。
+        state.hourMode = wantHour;
+        const requestedBefore = state.oneDayMetricsDelivered;
+        if (!clickNativePeriod("1 天")) return;
+
+        const selected = await waitForNativePeriod("1 天", id);
+        if (!isCurrentPeriodSwitch(id)) return;
+        const requested = await waitForOneDayMetrics(requestedBefore, id);
+        if (!isCurrentPeriodSwitch(id)) return;
+
+        log("period switch", { target, attempt, selected, requested });
+        if (selected && requested) return;
+      }
+      warn("1 小时 / 1 天切换后未观察到完整的 1d 请求；可开启 DEBUG 检查。");
+    } catch (error) {
+      warn("1 小时 / 1 天切换失败。", error);
+    } finally {
+      if (isCurrentPeriodSwitch(id)) {
+        state.periodTarget = null;
+        scheduleEnhance();
+        scheduleDelayedEnhance();
+      }
+    }
   }
 
   function clickNativePeriod(label) {
     const group = findPeriodGroup();
     const button = group && group.buttons && group.buttons.get(label);
-    if (!button) return false;
+    if (!button || isDisabledPeriodButton(button)) return false;
 
+    // React 的原生 click 是同步派发；只在该事件的捕获阶段屏蔽自拦截。
+    const priorSuppress = state.suppressNativeReset;
     state.suppressNativeReset = true;
-    button.dispatchEvent(
-      new MouseEvent("click", {
-        bubbles: true,
-        cancelable: true,
-        view: window
-      })
-    );
-
-    window.setTimeout(() => {
-      state.suppressNativeReset = false;
-    }, 0);
-
+    state.syntheticPeriodClick = true;
+    try {
+      button.dispatchEvent(
+        new MouseEvent("click", {
+          bubbles: true,
+          cancelable: true,
+          view: window
+        })
+      );
+    } finally {
+      state.syntheticPeriodClick = false;
+      state.suppressNativeReset = priorSuppress;
+    }
     return true;
   }
 
@@ -950,6 +1292,18 @@
   function syncOnlineContext() {
     const id = getServerIdFromPath();
 
+    // Next/React 的客户端路由不会重建 userscript：跨服务器时需要清除旧状态。
+    if (id !== state.periodServerId) {
+      state.periodServerId = id;
+      state.periodSwitchId++;
+      state.periodTarget = null;
+      state.hourMode = false;
+      state.dayRawCache.clear();
+      state.dayQueryFullPoints.clear();
+      state.metricQueryClient = null;
+      state.dayRestoreUntil = 0;
+    }
+
     if (id !== state.onlineServerId) {
       state.onlineServerId = id;
       resetOnlineState();
@@ -967,6 +1321,8 @@
   function findPeriodGroup() {
     const containers = Array.from(document.querySelectorAll("div[class*='rounded-full']"))
       .filter((element) => {
+        // 避免误选其它 Tab 内仍留在 DOM 中的隐藏历史周期选择器。
+        if (!element.isConnected || element.getClientRects().length === 0) return false;
         const text = normalizeText(element.textContent);
         const className = String(element.getAttribute("class") || "");
         return (
@@ -1081,15 +1437,26 @@
   }
 
   function findActiveNativeLabel(group) {
-    for (const [label, button] of group.buttons) {
-      const className = String(button.getAttribute("class") || "");
-      const isMuted = className.includes("text-muted-foreground");
-      const isDisabled =
-        className.includes("cursor-not-allowed") || className.includes("opacity-40");
+    const enabled = [...group.buttons.entries()].filter(([, button]) => !isDisabledPeriodButton(button));
 
-      if (!isMuted && !isDisabled) return label;
+    // 优先读取组件明确标记的选中态，避免未选中按钮也没有 muted class。
+    for (const [label, button] of enabled) {
+      if (
+        button.getAttribute("aria-pressed") === "true" ||
+        button.getAttribute("aria-selected") === "true" ||
+        button.getAttribute("data-state") === "active"
+      ) return label;
     }
 
+    for (const [label, button] of enabled) {
+      if (button.classList.contains("text-foreground") &&
+          !button.classList.contains("text-muted-foreground")) return label;
+    }
+
+    // 兼容旧版前端：选中按钮不带 muted，非选中按钮带 muted。
+    for (const [label, button] of enabled) {
+      if (!button.classList.contains("text-muted-foreground")) return label;
+    }
     return null;
   }
 
