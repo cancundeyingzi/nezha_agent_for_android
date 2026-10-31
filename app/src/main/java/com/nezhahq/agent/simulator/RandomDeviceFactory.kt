@@ -1,5 +1,6 @@
 package com.nezhahq.agent.simulator
 
+import com.nezhahq.agent.collector.addGpuSample
 import proto.Nezha.GeoIP
 import proto.Nezha.Host
 import proto.Nezha.IP
@@ -94,7 +95,7 @@ object RandomDeviceFactory {
                     .setTemperature(random.nextDouble(28.0, 82.0))
                     .build()
             )
-            .addGpu(random.nextDouble(0.0, 100.0))
+            .addGpuSample { listOf(random.nextDouble(0.0, 100.0)) }
             .build()
 
         return SimulatedDevice(

@@ -38,7 +38,7 @@
 | DEV04 | 参数数组、独立输出、stdin、超时取消和有界收尾 | 实现、双审查、39/356 单测及 release/lint 通过；真实 R8 helper 已验证，尚未接 Runtime |
 | DEV05 | 有界目录枚举、普通文件分段读取和 fd 校验 | 实现、双审查及构建检查通过；API36 debug/R8各25例、API23读/能力边界通过 |
 | DEV06 | Root/Shizuku 适配与明确能力错误 | 实现及需求/质量复审通过；普通/高权 helper 已设备验证，真实 SukiSU 授权链待手测 |
-| DEV07 | State.gpus=18、旧 gpu=17 同采样映射 | 待实施 |
+| DEV07 | State.gpus=18、旧 gpu=17 同采样映射 | 实现、需求/质量审查、40/436 单测及 release/R8/lint 通过 |
 | DEV08 | 单测、lint 门禁、release、设备/面板/稳定性验证 | 待实施 |
 
 ## 本轮必须落实的边界
@@ -143,3 +143,12 @@ API26+ 的 FsList 使用已打开目录 fd 的 `/proc/self/fd` 锚定路径进�
 - 同一 App 进程启动四个高权资源束，在 HELLO/REQUEST 已接纳并实际执行命令后杀死测试 Shizuku 服务；四张未知票先保留，新服务授权后的固定维护协议按需恢复至零。测试只处理隔离模拟器与本地面板。
 - API23 上实际 R8 helper 通过 UID0 固定代理执行。该模拟器原本具有 root adbd，此证据证明 Root 执行机制，不代替 SukiSU 的 App 授权链。
 - Root/SukiSU 的授权与撤权、Android15/17 真机、24 小时后台以及原发行签名覆盖安装仍需真实验收。长期无法证明退出的维护槽或握手前资源可能需要真正终止并重开 App 进程；停止/启动探针服务不等于重建进程。
+
+## DEV07 本地验证
+
+- 保留旧 `gpu=17`，新增 `gpus=18` 及 `State_GPU`。系统采集与模拟器在原采样位置各只取一次 GPU 样本，同时映射两个字段，未知显存保留 0 MiB。
+- 空样本、普通异常和整份非有限样本只省略 GPU，不阻断其他指标；取消仍传播，真实 0% 保留。没有改动 GpuCollector 缓存、采集来源或名称查询。
+- 9 项新测试验证同采样、异常边界及固定旧/新 protobuf 字节，包含 packed/unpacked 旧字段和旧读取器跳过新字段；模拟器增加两个字段一致及未知显存断言。
+- 需求与质量审查通过；40 项 core、436 项 app 单测全部通过，release/R8、lint 通过。独立 sandbox protoc 的 Windows DLL 启动错误没有在标准 Gradle 构建路径复现。
+- 全量检查另暴露旧启动重试测试的观察竞态：onStart 发信号早于 controller 发布 current。测试改为等待同一控制器的串行操作后再断言，保留重试次数/退避序列等全部断言，并保证失败时清理；业务代码未更改。
+- Android15/17 SukiSU 的 GPU 来源可读性和实际面板展示仍待手测，不以 wire fixture 代替硬件验证。

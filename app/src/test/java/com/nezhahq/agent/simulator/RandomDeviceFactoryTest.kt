@@ -40,6 +40,8 @@ class RandomDeviceFactoryTest {
             assertTrue(state.processCount > 0L)
             assertTrue(state.temperaturesList.isNotEmpty())
             assertTrue(state.gpuList.isNotEmpty())
+            assertEquals(state.gpuList, state.gpusList.map { it.utilization })
+            assertTrue(state.gpusList.all { it.memoryUsed == 0L && it.memoryTotal == 0L })
         }
     }
 

@@ -125,9 +125,10 @@ class SystemStateCollector(
         val loadAvg = readLoadAverage(isRootMode, privilegedMetrics?.loadAverage)
 
         // ── 8. GPU 使用率（Root/Shizuku 模式可用）────────────────────────────
-        val gpuUsages = gpuCollector.getGpuUsages(isRootMode)
+        val stateBuilder = State.newBuilder()
+            .addGpuSample { gpuCollector.getGpuUsages(isRootMode) }
 
-        return State.newBuilder()
+        return stateBuilder
             .setCpu(cpuUsage)
             .setMemUsed(memUsed)
             .setSwapUsed(swapUsed)
@@ -144,7 +145,6 @@ class SystemStateCollector(
             .setUdpConnCount(udpConnCount)
             .setProcessCount(processCount)
             .addAllTemperatures(batteryMetrics)
-            .addAllGpu(gpuUsages)
             .build()
     }
 
