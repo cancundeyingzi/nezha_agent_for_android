@@ -3,17 +3,16 @@ package com.nezhahq.agent.util
 import java.io.InputStream
 import java.io.OutputStream
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
  * Guards the one liveness check both [RootShell] and [PersistentShell] now share.
  *
- * It reads like something [Process.isAlive] could replace, and twice it was copied rather than
- * shared. Neither substitution is safe: `isAlive()` is API 26+ while the app ships to API 23, and
- * it reports a running Shizuku shell as dead because that shell is a remote process whose
- * `exitValue()` signals "still running" with [IllegalStateException] instead of the
- * [IllegalThreadStateException] the JDK contract names. These cases fail if either detail is lost.
+ * It reads like something [Process.isAlive] could replace, but that API is 26+ while the app ships
+ * to API 23. A live remote Shizuku process is normalized to [IllegalThreadStateException] by
+ * [RemoteShellProcess]; other runtime failures are transport errors and must not be swallowed.
  */
 class ProcessLivenessTest {
 
@@ -29,8 +28,10 @@ class ProcessLivenessTest {
     }
 
     @Test
-    fun runningShizukuShellIsAliveDespiteReportingIllegalState() {
-        assertTrue(isProcessAlive(FakeProcess { throw IllegalStateException("Not exited") }))
+    fun remoteTransportFailureIsNotMistakenForALiveProcess() {
+        assertThrows(IllegalStateException::class.java) {
+            isProcessAlive(FakeProcess { throw IllegalStateException("Binder disconnected") })
+        }
     }
 
     /** Only [exitValue] matters here; the streams are never touched by the check under test. */

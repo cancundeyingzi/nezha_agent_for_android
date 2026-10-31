@@ -101,18 +101,15 @@ internal class ShellSession(
  * The single liveness check for every privileged shell process in this package.
  *
  * `Process.isAlive()` is API 26+ while this app ships to API 23, so liveness has to be inferred
- * from [Process.exitValue]. The second catch is not redundant: a Shizuku shell is a remote process
- * whose `exitValue()` reports "still running" as [IllegalStateException] rather than the
- * [IllegalThreadStateException] the JDK contract specifies, and treating that as "dead" would make
- * every Shizuku session look like it had already exited.
+ * from [Process.exitValue]. [RemoteShellProcess] normalizes a live Shizuku process to the JDK's
+ * [IllegalThreadStateException] contract. Other runtime failures are transport errors and must
+ * propagate so the caller can discard the broken session.
  */
 internal fun isProcessAlive(process: Process): Boolean {
     return try {
         process.exitValue()
         false
     } catch (_: IllegalThreadStateException) {
-        true
-    } catch (_: IllegalStateException) {
         true
     }
 }
