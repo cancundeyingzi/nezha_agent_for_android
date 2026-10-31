@@ -3,6 +3,7 @@ package com.nezhahq.agent.mcp
 import com.google.gson.stream.JsonWriter
 import com.google.protobuf.CodedOutputStream
 import com.nezhahq.agent.core.mcp.ExecResult
+import com.nezhahq.agent.core.mcp.FsEntry
 import com.nezhahq.agent.core.mcp.FsListResult
 import com.nezhahq.agent.core.mcp.FsReadResult
 import com.nezhahq.agent.core.mcp.McpBusinessError
@@ -87,17 +88,7 @@ class McpResultEncoder(private val maxResultBytes: Int = McpLimits.MAX_TASK_RESU
             is FsListResult -> {
                 json.name("entries").beginArray()
                 for (entry in result.entries) {
-                    json.beginObject()
-                    json.name("name").value(entry.name)
-                    json.name("type").value(entry.type.wireName)
-                    json.name("size").value(entry.size)
-                    json.name("mode").value(entry.mode)
-                    json.name("mtime").value(entry.mtime)
-                    if (entry.isSymlink) json.name("is_symlink").value(true)
-                    entry.linkTarget?.takeIf { it.isNotEmpty() }?.let {
-                        json.name("link_target").value(it)
-                    }
-                    json.endObject()
+                    writeFsEntry(json, entry)
                 }
                 json.endArray()
                 if (result.truncated) json.name("truncated").value(true)
@@ -142,7 +133,53 @@ class McpResultEncoder(private val maxResultBytes: Int = McpLimits.MAX_TASK_RESU
     companion object {
         const val OUTPUT_TOO_LARGE = "output/result too large"
         const val INTERNAL_ENCODING_FAILURE = "{\"error\":\"agent: failed to encode result\"}"
+
+        /** Same escaping and fields as the final encoder; no copy of the entry JSON is retained. */
+        internal fun fsEntryEncodedBytes(entry: FsEntry, limit: Int): Int? {
+            val counter = CountingUtf8Writer(limit)
+            return try {
+                JsonWriter(counter).use { writeFsEntry(it, entry) }
+                counter.bytes.toInt()
+            } catch (_: ResultTooLarge) { null }
+        }
     }
+}
+
+private fun writeFsEntry(json: JsonWriter, entry: FsEntry) {
+    json.beginObject()
+    json.name("name").value(entry.name)
+    json.name("type").value(entry.type.wireName)
+    json.name("size").value(entry.size)
+    json.name("mode").value(entry.mode)
+    json.name("mtime").value(entry.mtime)
+    if (entry.isSymlink) json.name("is_symlink").value(true)
+    entry.linkTarget?.takeIf { it.isNotEmpty() }?.let { json.name("link_target").value(it) }
+    json.endObject()
+}
+
+private class CountingUtf8Writer(private val limit: Int) : Writer() {
+    var bytes = 0L
+        private set
+    private var previousHigh = false
+
+    override fun write(chars: CharArray, offset: Int, length: Int) {
+        for (index in offset until offset + length) write(chars[index].code)
+    }
+
+    override fun write(value: String, offset: Int, length: Int) {
+        for (index in offset until offset + length) write(value[index].code)
+    }
+
+    override fun write(char: Int) {
+        val value = char.toChar()
+        val next = bytes + utf8ByteIncrement(value, previousHigh)
+        if (next > limit) throw ResultTooLarge()
+        bytes = next
+        previousHigh = value.isHighSurrogate()
+    }
+
+    override fun flush() = Unit
+    override fun close() = Unit
 }
 
 private class ResultTooLarge : IOException()

@@ -36,8 +36,8 @@
 | DEV02 | 必要候选修复、严格 HTTP 证书探测、脱敏 | 实现、两轮审查及本地检查通过；设备回归待后续 |
 | DEV03 | 类型化 DTO、严格解析、结果语义、权限、配额与字节预算 | 实现、两轮审查、39/310 单测及 release/lint 通过；尚未接入真实任务 |
 | DEV04 | 参数数组、独立输出、stdin、超时取消和有界收尾 | 实现、双审查、39/356 单测及 release/lint 通过；真实 R8 helper 已验证，尚未接 Runtime |
-| DEV05 | 有界目录枚举、普通文件分段读取和 fd 校验 | 进行中 |
-| DEV06 | Root/Shizuku 适配与明确能力错误 | 待实施 |
+| DEV05 | 有界目录枚举、普通文件分段读取和 fd 校验 | 实现、双审查及构建检查通过；API36 debug/R8各25例、API23读/能力边界通过 |
+| DEV06 | Root/Shizuku 适配与明确能力错误 | 进行中 |
 | DEV07 | State.gpus=18、旧 gpu=17 同采样映射 | 待实施 |
 | DEV08 | 单测、lint 门禁、release、设备/面板/稳定性验证 | 待实施 |
 
@@ -120,3 +120,13 @@ API26+ 的 FsList 使用已打开目录 fd 的 `/proc/self/fd` 锚定路径进�
 - 真实 UID/eUID/proc UID 一致，PID/pgrp/SID 一致；protobuf 高位任务 ID `9223372036854775825` 无损，用户 exit 7 与 helper 外层 137 正确分开。R8 入口及无反射 DTO 路径没有被裁剪破坏。
 - Windows adb.exe 文本 stdout 会改变换行；设备测试改用按 AOSP shell v2 规范实现的原始二进制连接，确认帧与 NUL/换行字节保真。这是测试传输适配，不改变产品内部帧协议。
 - 此时仍没有 Task15 的 Runtime/gRPC 接线；以上证明独立后端与 helper，不能替代最终面板往返测试。Root/Shizuku 后端接入仍属 DEV06。
+
+## DEV05 本地与设备验证
+
+- 28 项初版/兼容修正测试及后续两项清理异常组合测试通过；工作包全量 core/app 测试通过，最后的 owner 变更又执行受影响测试类。debug、release/R8、lint 检查通过。
+- 处理了 `O_CLOEXEC` 字段 API27、`fcntlInt` 方法 API30 的公开 API 边界；使用 NDK27 两组已验证布局的原子 UAPI flag，未知布局明确能力错误，无隐藏反射或 lint 抑制。
+- 需求与质量审查通过。无效参数测试会检查零打开次数；pin/原 fd/anchor/stream 多处同时失败时保留原错误和 suppressed，不因清理改写主因。
+- API36 / 16 KiB 页，debug 和实际 R8 代码各 25 例通过：空/特殊名/隐藏过滤、5011/5020 项目录截断和完整 total、长 link_target 预算错误、分段读取/Base64/段 hash、1 MiB 限额、UTF-8 边界、空与 EOF 外/精确 Long/Long.MAX 偏移、业务与解析错误、目录/FIFO/device/symlink 拒绝、末尾 `/` 和 `/.` 保护、权限错误及 JSON 膨胀后的空内容错误语义。
+- 已从 Google 官方镜像建立全新的 API23 / Android6 x86 隔离设备，现有 SDK/AVD 不变。应用可安装冷启动并持续运行，无 AndroidRuntime 崩溃；debug 和 R8 的 FsRead 实际段/Base64/size/SHA256 正确，FsList 在加载 NIO26 前明确返回 `bounded_directory_enumeration_unavailable`。API23 helper Exec 也已真实通过 UID/session/高位 ID/exit7。
+- API23 旧 ADB exec 不提供远端退出码；验证中不把传输 EOF 的 0 当作 helper 实际退出码，用户命令结果仍由 protobuf 内的真实 exit_code 判断。
+- 用户提供的手测设备为 Android15/17，均使用 SukiSU；后续 Root 用例按该环境交付。原发行签名仍未提供。

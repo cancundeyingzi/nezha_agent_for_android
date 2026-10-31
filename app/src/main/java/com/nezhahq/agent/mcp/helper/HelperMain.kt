@@ -4,6 +4,7 @@ import android.system.Os
 import android.system.OsConstants
 import android.system.ErrnoException
 import com.nezhahq.agent.mcp.transport.HelperProtocol
+import com.nezhahq.agent.mcp.fs.AndroidFsAccess
 import java.io.File
 import java.io.FileDescriptor
 import java.io.FileInputStream
@@ -32,7 +33,7 @@ object HelperMain {
             val directory = File(args[1])
             val temporary = File(args[2])
             if (!directory.isAbsolute || !temporary.isAbsolute) return
-            HelperSession(isolation, HelperSession.execHandlers(directory, temporary))
+            HelperSession(isolation, HelperSession.handlers(directory, temporary, AndroidFsAccess()))
                 .run(input, output, nonce, lifetime)
         } catch (_: Throwable) {
             // No raw request, environment, output or exception text goes into platform logs.

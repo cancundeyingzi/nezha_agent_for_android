@@ -10,6 +10,7 @@ object McpLimits {
     const val MAX_EXEC_OUTPUT_BYTES = 1_048_576L
     const val MAX_FS_READ_BYTES = 1_048_576L
     const val MAX_FS_LIST_ENTRIES = 5_000
+    const val DEFAULT_FILE_TIMEOUT_SECONDS = 30L
     const val MAX_REQUEST_BYTES = 1_048_576L
     const val MAX_JSON_DEPTH = 64
     const val MAX_TASK_RESULT_BYTES = 3 * 1024 * 1024

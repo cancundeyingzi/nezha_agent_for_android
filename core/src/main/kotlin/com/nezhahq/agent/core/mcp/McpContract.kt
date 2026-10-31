@@ -126,12 +126,15 @@ object McpRequestRules {
                 )
             ))
         }
-        is FsListRequest -> pathError(request.path) ?: McpValidation.Valid(request)
+        is FsListRequest -> pathError(request.path) ?: McpValidation.Valid(
+            request.copy(path = McpFsPath.cleanAbsolute(request.path))
+        )
         is FsReadRequest -> pathError(request.path) ?: when {
             request.offset < 0 -> invalid("offset must not be negative")
             request.length < 0 -> invalid("length must not be negative")
             request.encoding !in setOf("", "utf8", "base64") -> invalid("unknown encoding")
             else -> McpValidation.Valid(request.copy(
+                path = McpFsPath.cleanAbsolute(request.path),
                 length = defaultAndClamp(
                     request.length, McpLimits.MAX_FS_READ_BYTES, McpLimits.MAX_FS_READ_BYTES
                 ),

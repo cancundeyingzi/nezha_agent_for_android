@@ -3,6 +3,9 @@ package com.nezhahq.agent.mcp.helper
 import com.nezhahq.agent.core.mcp.ExecRequest
 import com.nezhahq.agent.core.mcp.McpBusinessError
 import com.nezhahq.agent.core.mcp.McpErrorCode
+import com.nezhahq.agent.core.mcp.FsListRequest
+import com.nezhahq.agent.core.mcp.FsReadRequest
+import com.nezhahq.agent.core.mcp.McpLimits
 import com.nezhahq.agent.core.mcp.McpRequest
 import com.nezhahq.agent.core.mcp.McpRequestRules
 import com.nezhahq.agent.core.mcp.McpResult
@@ -14,6 +17,8 @@ import com.nezhahq.agent.mcp.McpResultEncoder
 import com.nezhahq.agent.mcp.exec.ExecEnvironment
 import com.nezhahq.agent.mcp.exec.ExecOutput
 import com.nezhahq.agent.mcp.exec.HelperExecRunner
+import com.nezhahq.agent.mcp.fs.FsAccess
+import com.nezhahq.agent.mcp.fs.HelperFsRunner
 import com.nezhahq.agent.mcp.transport.HelperDeadline
 import com.nezhahq.agent.mcp.transport.HelperProtocol
 import java.io.File
@@ -85,7 +90,7 @@ class HelperSession(
                         )) else {
                             val preparedRequest = prepared.request
                             val maximum = if (preparedRequest is ExecRequest) preparedRequest.timeoutSeconds * 1000
-                                else HelperProtocol.MAX_LIFETIME_MILLIS.toLong()
+                                else McpLimits.DEFAULT_FILE_TIMEOUT_SECONDS * 1000
                             val remaining = minOf(lifetime.remainingMillis, request.remainingMillis.toLong(), maximum)
                             val context = HelperExecutionContext(
                                 HelperDeadline.afterMillis(remaining), request.elapsedMillis.toLong()
@@ -130,5 +135,17 @@ class HelperSession(
                     request as ExecRequest, context.deadline, context.elapsedBeforeRequest, emit
                 )
             })
+
+        fun handlers(defaultDirectory: File, temporaryDirectory: File, files: FsAccess): Map<McpTaskFamily, HelperRequestHandler> {
+            val fs = HelperFsRunner(files)
+            return execHandlers(defaultDirectory, temporaryDirectory) + mapOf(
+                McpTaskFamily.FS_LIST to HelperRequestHandler { request, context, _ ->
+                    fs.list(request as FsListRequest, context)
+                },
+                McpTaskFamily.FS_READ to HelperRequestHandler { request, context, _ ->
+                    fs.read(request as FsReadRequest, context)
+                }
+            )
+        }
     }
 }
