@@ -12,8 +12,9 @@ android {
         applicationId = "com.nezhahq.agent"
         minSdk = 23
         targetSdk = 35
-        versionCode = 385
-        versionName = "A0.10.1"
+        versionCode = 386
+        versionName = "A0.11.0-r1"
+        manifestPlaceholders["appLabel"] = "@string/app_name"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -27,6 +28,16 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+        create("r1test") {
+            // Exercise the release R8 rules in a debuggable, separately installable package.
+            initWith(getByName("release"))
+            applicationIdSuffix = ".r1test"
+            manifestPlaceholders["appLabel"] = "哪吒探针 R1测试"
+            signingConfig = signingConfigs.getByName("debug")
+            isDebuggable = true
+            isMinifyEnabled = true
+            matchingFallbacks += listOf("debug")
         }
     }
     compileOptions {

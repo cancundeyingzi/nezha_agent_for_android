@@ -26,10 +26,20 @@ jobs:
       - name: Unit tests
         run: ./gradlew :core:test :app:testDebugUnitTest
 
-      # R8 runs only in the release build, and its keep rules are the kind of thing that breaks
-      # without anyone noticing until an install fails. Build it on every change.
-      - name: Release build
-        run: ./gradlew :app:assembleRelease
+      - name: Release lint
+        run: ./gradlew :app:lintRelease
+
+      # Both variants run R8; r1test adds a debug signature and a separate application ID.
+      - name: Release and R1 test builds
+        run: ./gradlew :app:assembleRelease :app:assembleR1test
+
+      - name: Upload R1 test APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: nezha-agent-r1test
+          path: app/build/outputs/apk/r1test/app-r1test.apk
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Upload test reports
         if: failure()
@@ -39,4 +49,6 @@ jobs:
           path: |
             app/build/reports/tests/
             core/build/reports/tests/
+            app/build/reports/lint-results-release.html
+            app/build/reports/lint-results-release.xml
           retention-days: 7
