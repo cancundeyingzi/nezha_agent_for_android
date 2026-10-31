@@ -132,6 +132,7 @@ internal class PersistentShell(
     private val activeSession = AtomicReference<ShellSession?>()
     private val activeReadTask = AtomicReference<ReadTask?>()
     private val shutdownRequests = AtomicInteger()
+    private val retired = AtomicBoolean()
 
     fun execute(command: String, timeoutMs: Long = DEFAULT_SHELL_TIMEOUT_MS): String = lock.withLock {
         if (isShuttingDown()) return@withLock ""
@@ -184,6 +185,11 @@ internal class PersistentShell(
         }
     }
 
+    /** Permanently rejects reuse. State only: the owner calls [shutdown] after detaching it. */
+    fun retire() {
+        retired.set(true)
+    }
+
     fun shutdown() {
         shutdownRequests.incrementAndGet()
         try {
@@ -203,10 +209,10 @@ internal class PersistentShell(
     }
 
     fun isAlive(): Boolean = lock.withLock {
-        session?.process?.let(::isProcessAlive) == true
+        !isShuttingDown() && session?.process?.let(::isProcessAlive) == true
     }
 
-    fun sessionType(): String? = lock.withLock { session?.type }
+    fun sessionType(): String? = lock.withLock { if (isShuttingDown()) null else session?.type }
 
     private fun ensureAlive(): ShellSession? {
         if (isShuttingDown()) return null
@@ -229,6 +235,10 @@ internal class PersistentShell(
             val created = sessionFactory()
             if (created == null) {
                 if (!isShuttingDown()) lastStartFailedMs = now
+                return null
+            }
+            if (isShuttingDown()) {
+                created.destroy()
                 return null
             }
 
@@ -289,7 +299,7 @@ internal class PersistentShell(
         readerExecutor = null
     }
 
-    private fun isShuttingDown(): Boolean = shutdownRequests.get() > 0
+    private fun isShuttingDown(): Boolean = retired.get() || shutdownRequests.get() > 0
 
     private fun unwrap(exception: Exception): Exception {
         return if (exception is ExecutionException) {

@@ -344,16 +344,32 @@ class AgentConfigCommandProcessorTest {
             delayBeforeRetry = { synchronized(waitedDelays) { waitedDelays += it } }
         )
 
-        processor.requestReload()
+        try {
+            processor.requestReload()
 
-        assertTrue(started.await(2, TimeUnit.SECONDS))
-        assertEquals(3, attempts.get())
-        assertTrue(controller.isRunning)
-        assertEquals(listOf(5_000L, 10_000L), synchronized(reportedDelays) { reportedDelays.toList() })
-        assertEquals(listOf(5_000L, 10_000L), synchronized(waitedDelays) { waitedDelays.toList() })
-        runBlocking { processor.close(); controller.stop() }
-        dispatcher.close()
-        executor.shutdownNow()
+            assertTrue(started.await(2, TimeUnit.SECONDS))
+            // onStart 回调尚未发布 current；等待同一控制器的串行操作，确认 reload 已完成。
+            runBlocking {
+                withTimeout(2_000) { controller.updateCapabilities(RemoteCapabilities()) }
+            }
+            assertEquals(3, attempts.get())
+            assertTrue(controller.isRunning)
+            assertEquals(listOf(5_000L, 10_000L), synchronized(reportedDelays) { reportedDelays.toList() })
+            assertEquals(listOf(5_000L, 10_000L), synchronized(waitedDelays) { waitedDelays.toList() })
+        } finally {
+            try {
+                runBlocking {
+                    try {
+                        processor.close()
+                    } finally {
+                        controller.stop()
+                    }
+                }
+            } finally {
+                dispatcher.close()
+                executor.shutdownNow()
+            }
+        }
     }
 
     @Test

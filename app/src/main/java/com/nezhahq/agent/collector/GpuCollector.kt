@@ -19,6 +19,9 @@ import java.io.File
 private const val DUMPSYS_THROTTLE_MS = 5_000L
 private const val PRIVILEGED_UNAVAILABLE_RETRY_MS = 30_000L
 
+// 硬件名称和厂商在 App 进程期间不变，Runtime 重建复用成功查询。
+private val processGpuHardwareInfoCache = GpuHardwareInfoCache()
+
 /** GPU 使用率的采集方案，按探测优先级由高到低排列。 */
 internal enum class GpuCollectionStrategy {
     DIRECT,
@@ -238,15 +241,16 @@ class GpuCollector internal constructor(
         // 快速路径：已缓存直接返回
         cachedGpuName?.let { return listOf(it) }
 
-        // 首次采集（synchronized 防止并发重复创建 EGL 上下文）
+        // 实例锁保护缓存发布，进程缓存合并跨实例查询。
         synchronized(this) {
             // 双重检查锁
             cachedGpuName?.let { return listOf(it) }
 
-            val (renderer, vendor) = queryGpuInfoViaEgl() ?: return emptyList()
-            cachedGpuName = renderer
-            cachedGpuVendor = vendor
-            return listOf(renderer)
+            val gpuInfo = processGpuHardwareInfoCache.getOrQuery(::queryGpuInfoViaEgl)
+                ?: return emptyList()
+            cachedGpuVendor = gpuInfo.second
+            cachedGpuName = gpuInfo.first
+            return listOf(cachedGpuName!!)
         }
     }
 
@@ -389,6 +393,15 @@ class GpuCollector internal constructor(
                 }
             } catch (e: Exception) {
                 Logger.e("GpuCollector: EGL 资源释放异常", e)
+            } finally {
+                // 最后一次 EGL 调用，避免后续查询重新创建线程状态。
+                try {
+                    if (!EGL14.eglReleaseThread()) {
+                        Logger.e("GpuCollector: EGL 线程状态释放失败 (eglReleaseThread)")
+                    }
+                } catch (e: Exception) {
+                    Logger.e("GpuCollector: EGL 线程状态释放异常 (eglReleaseThread)", e)
+                }
             }
         }
     }

@@ -32,3 +32,11 @@
 
 # 忽略 gRPC 引用的旧版 OkHttp 类
 -dontwarn com.squareup.okhttp.**
+
+# app_process loads exactly this static main by name. Its reachable code needs no DTO/reflection keep.
+-keep class com.nezhahq.agent.mcp.helper.HelperMain {
+    public static void main(java.lang.String[]);
+}
+-keep class com.nezhahq.agent.mcp.privileged.HelperCleanupMain {
+    public static void main(java.lang.String[]);
+}

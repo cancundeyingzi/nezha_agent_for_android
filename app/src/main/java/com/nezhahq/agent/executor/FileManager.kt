@@ -26,9 +26,7 @@ class FileManager internal constructor(
     private val context: Context,
     private val streamId: String,
     private val openIoStream: (Flow<Nezha.IOStreamData>) -> Flow<Nezha.IOStreamData>,
-    private val downloadSourceOverride: DownloadFileSource?,
-    /** 单调时钟，仅为让"中止后静默期"可被单测驱动而注入；生产走 [System.nanoTime]。 */
-    private val nanoTime: () -> Long = System::nanoTime
+    private val downloadSourceOverride: DownloadFileSource?
 ) {
     constructor(
         context: Context,
@@ -66,27 +64,12 @@ class FileManager internal constructor(
     private val outputChannel = Channel<Nezha.IOStreamData>(OUTPUT_BUFFER_CAPACITY)
     private val closed = AtomicBoolean(false)
 
-    /**
-     * 入站帧的解释方式。
-     *
-     * 之前是一个 `uploadSession: UploadSession?`，null 同时表达了两件事：
-     * "空闲，按操作码解释" 和 "刚刚中止"。后者被当成前者，正是残余文件内容被
-     * 逐块当指令执行的原因，所以这里把两种含义拆成显式状态。
-     */
     private sealed interface UploadState {
-        /** 空闲：入站帧按操作码解释。 */
         data object Idle : UploadState
-
-        /** 上传进行中：入站帧一律是文件内容。 */
         data class Active(val session: UploadSession) : UploadState
-
-        /**
-         * 上传已中止，正在排空面板尚未发完的残余内容。
-         *
-         * [lastFrameNanos] 是最近一次收到（并丢弃）帧的时刻，用于判断静默期，
-         * 详见 [UploadAbortRecovery]。
-         */
-        data class Aborted(val lastFrameNanos: Long) : UploadState
+        // The protocol has no frame marker separating residual content from a new opcode. A
+        // failed upload therefore drains this stream permanently; recovery requires a new session.
+        data object Aborted : UploadState
     }
 
     @Volatile private var uploadState: UploadState = UploadState.Idle
@@ -99,7 +82,7 @@ class FileManager internal constructor(
                     .setData(ByteString.copyFrom(header))
                     .build()
                 outputChannel.send(headerMsg)
-                Logger.i("FileManager: 已发送 StreamID 握手帧 (StreamID=$streamId)")
+                Logger.i("FileManager: 已发送会话握手帧")
 
                 launch { keepAliveLoop() }
 
@@ -107,46 +90,30 @@ class FileManager internal constructor(
                     val bytes = ioData.data.toByteArray()
                     if (bytes.isEmpty()) return@collect
 
-                    val opcode = bytes[0].toInt() and 0xFF
                     when (val state = uploadState) {
                         is UploadState.Active -> {
                             handleUploadChunk(state.session, bytes)
                             return@collect
                         }
-
-                        is UploadState.Aborted -> {
-                            val now = nanoTime()
-                            if (!UploadAbortRecovery.isNewCommandFrame(
-                                    opcode,
-                                    now - state.lastFrameNanos
-                                )
-                            ) {
-                                // 消息刻意不含长度等可变内容，交给 Logger 的去重折叠成一条 ×N
-                                Logger.i("FileUpload: 上传已中止，丢弃面板残余数据 (StreamID=$streamId)")
-                                uploadState = UploadState.Aborted(now)
-                                return@collect
-                            }
-                            Logger.i("FileUpload: 静默期后收到新指令，恢复正常分发 (StreamID=$streamId)")
-                            uploadState = UploadState.Idle
-                        }
-
+                        UploadState.Aborted -> return@collect
                         UploadState.Idle -> Unit
                     }
 
-                    when (opcode) {
+                    when (bytes[0].toInt() and 0xFF) {
                         0x00 -> {
                             val dirPath = String(bytes, 1, bytes.size - 1, Charsets.UTF_8)
-                            Logger.i("FileManager: 收到列目录请求: $dirPath (StreamID=$streamId)")
+                            Logger.i("FileManager: 收到列目录请求")
                             listDir(dirPath)
                         }
                         0x01 -> {
                             val filePath = String(bytes, 1, bytes.size - 1, Charsets.UTF_8)
-                            Logger.i("FileManager: 收到下载请求: $filePath (StreamID=$streamId)")
+                            Logger.i("FileManager: 收到下载请求")
                             withContext(Dispatchers.IO) { download(filePath) }
                         }
                         0x02 -> {
                             if (bytes.size < UPLOAD_MIN_REQUEST_BYTES) {
-                                sendError("上传请求数据无效（数据长度不足 9 字节）")
+                                abortUploadSession()
+                                sendError("上传请求数据无效（数据长度不足 9 字节）；请重新打开文件管理会话")
                                 return@collect
                             }
                             val fileSize = ByteBuffer.wrap(bytes, UPLOAD_HEADER_OFFSET, UPLOAD_SIZE_BYTES)
@@ -157,7 +124,7 @@ class FileManager internal constructor(
                                 bytes.size - UPLOAD_PATH_OFFSET,
                                 Charsets.UTF_8
                             )
-                            Logger.i("FileUpload: 收到上传请求: $targetPath (size=$fileSize) (StreamID=$streamId)")
+                            Logger.i("FileUpload: 收到上传请求")
 
                             // 建会话失败也必须进入排空状态：面板不等 ack 就把整个文件推进了
                             // gRPC 缓冲区，而此刻 uploadState 还是 Idle。若停留在 Idle，后续每
@@ -168,16 +135,16 @@ class FileManager internal constructor(
                             val session = try {
                                 beginUpload(targetPath, fileSize)
                             } catch (e: IllegalArgumentException) {
-                                Logger.e("FileUpload: 上传请求被拒绝: ${e.message}")
                                 abortUploadSession()
-                                sendError(e.message ?: "上传请求无效")
+                                Logger.e("FileUpload: 上传请求被拒绝 (Error=${e.javaClass.simpleName})")
+                                sendError("${e.message ?: "上传请求无效"}；请重新打开文件管理会话")
                                 return@collect
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (e: Exception) {
-                                Logger.e("FileUpload: 无法创建临时缓存文件: $targetPath (StreamID=$streamId)", e)
                                 abortUploadSession()
-                                sendError("无法创建临时缓存文件: ${e.message}")
+                                Logger.e("FileUpload: 无法创建临时缓存文件 (Error=${e.javaClass.simpleName})")
+                                sendError("无法创建临时缓存文件: ${e.message}；请重新打开文件管理会话")
                                 return@collect
                             }
 
@@ -192,7 +159,7 @@ class FileManager internal constructor(
         } catch (e: CancellationException) {
             if (!currentCoroutineContext().isActive) throw e
         } catch (e: Exception) {
-            Logger.i("FileManager: 文件管理器会话结束 (StreamID=$streamId): ${e.message}")
+            Logger.i("FileManager: 文件管理器会话结束 (Error=${e.javaClass.simpleName})")
         }
     }
 
@@ -200,6 +167,7 @@ class FileManager internal constructor(
         targetPath: String,
         declaredSize: Long
     ): UploadSession = withContext(Dispatchers.IO) {
+        UploadSession.validateDeclaredSize(declaredSize)
         val cacheFile = File.createTempFile("nezha_upload_", ".tmp", context.cacheDir)
         try {
             UploadSession.create(targetPath, declaredSize, cacheFile).also {
@@ -239,11 +207,11 @@ class FileManager internal constructor(
             if (shellEntries != null) {
                 if (!dir.endsWith("/")) dir += "/"
                 val response = buildListDirResponse(dir, shellEntries)
-                Logger.i("FileManager: RootShell ls 列目录成功: $dir, 共 ${shellEntries.size} 条目 (StreamID=$streamId)")
+                Logger.i("FileManager: 高权限列目录成功")
                 sendData(response)
                 return
             }
-            Logger.i("FileManager: RootShell ls 无法访问 $dir，回退到 Java IO...")
+            Logger.i("FileManager: 高权限列目录失败，回退到 Java IO")
         }
 
         // ── 策略 2：Java IO（普通模式或 Root ls 失败时）───────────────────
@@ -257,7 +225,7 @@ class FileManager internal constructor(
                 FileEntry(file.name, isDir)
             }
             if (!dir.endsWith("/")) dir += "/"
-            Logger.i("FileManager: Java IO 列目录成功: $dir, 共 ${entries.size} 条目 (StreamID=$streamId)")
+            Logger.i("FileManager: Java IO 列目录成功")
             val response = buildListDirResponse(dir, entries)
             sendData(response)
             return
@@ -267,11 +235,11 @@ class FileManager internal constructor(
         // [安全修复] 原实现在 rootMode=false 时仍会回退到 RootShell/su 提权，
         // 导致用户以为关闭了高权限模式，文件管理器仍可能获得高权限。
         if (!isRootMode) {
-            Logger.i("FileManager: Java IO listFiles() 返回 null/空 (dir=$dir, exists=${javaFile.exists()}, canRead=${javaFile.canRead()})，rootMode=false，不尝试提权兜底")
+            Logger.i("FileManager: Java IO 列目录失败或为空，未授权高权限回退")
         }
 
         // ── 最终兜底：回退到 DEFAULT_HOME ───────────────────────────────────
-        Logger.i("FileManager: 所有方式均无法访问 $dir，回退到 $DEFAULT_HOME")
+        Logger.i("FileManager: 无法访问目录，回退到默认目录")
         dir = DEFAULT_HOME
         // 兜底路径也优先 Root ls
         if (isRootMode) {
@@ -358,7 +326,7 @@ class FileManager internal constructor(
                     try {
                         inputStream.close()
                     } catch (e: Exception) {
-                        Logger.e("FileManager: 关闭下载流失败: $filePath (StreamID=$streamId)", e)
+                        Logger.e("FileManager: 关闭下载流失败 (Error=${e.javaClass.simpleName})")
                     }
                 }
             }
@@ -392,7 +360,7 @@ class FileManager internal constructor(
                             sendData(buffer.copyOf(bytesRead))
                         }
                     }
-                    Logger.i("FileManager: 文件下载完成: $filePath (StreamID=$streamId)")
+                    Logger.i("FileManager: 文件下载完成")
                 } finally {
                     cancellationCloser.cancel()
                     withContext(NonCancellable + Dispatchers.IO) {
@@ -402,7 +370,7 @@ class FileManager internal constructor(
             }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            Logger.e("FileManager: 下载失败: $filePath (StreamID=$streamId)", e)
+            Logger.e("FileManager: 下载失败 (Error=${e.javaClass.simpleName})")
             sendError("下载失败: ${e.message}")
         }
     }
@@ -413,49 +381,47 @@ class FileManager internal constructor(
                 UploadWriteResult.AwaitingMore -> return
                 UploadWriteResult.Complete -> completeUpload(session)
                 is UploadWriteResult.Rejected -> {
-                    Logger.e("FileUpload: 上传校验失败: ${result.message} (StreamID=$streamId)")
-                    sendError(result.message)
                     abortUploadSession()
+                    Logger.e("FileUpload: 上传校验失败 (Error=DeclaredSizeExceeded)")
+                    sendError("${result.message}；请重新打开文件管理会话")
                 }
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Logger.e("FileUpload: 写入缓存文件失败: ${session.targetPath} (StreamID=$streamId)", e)
-            sendError("写入文件失败: ${e.message}")
             abortUploadSession()
+            Logger.e("FileUpload: 写入缓存文件失败 (Error=${e.javaClass.simpleName})")
+            sendError("写入文件失败: ${e.message}；请重新打开文件管理会话")
         }
     }
 
     private suspend fun completeUpload(session: UploadSession) {
+        var saved = false
         try {
             withContext(Dispatchers.IO) {
                 session.close()
             }
-            Logger.i("FileUpload: 文件传输到缓存完成，正在移动到目标路径: ${session.targetPath} (StreamID=$streamId)")
+            Logger.i("FileUpload: 缓存完成，正在保存")
             if (moveFileToTarget(session.cacheFile, session.targetPath)) {
+                saved = true
                 sendData(COMPLETE_IDENTIFIER)
-                Logger.i("FileUpload: 文件上传完成: ${session.targetPath} (StreamID=$streamId)")
+                Logger.i("FileUpload: 文件上传完成")
             } else {
-                sendError("文件保存失败，目标路径权限不足: ${session.targetPath}")
-                Logger.e("FileUpload: 无法将缓存文件移动到目标路径: ${session.targetPath}")
+                uploadState = UploadState.Aborted
+                sendError("文件保存失败，请检查目标类型、权限和剩余空间: ${session.targetPath}；请重新打开文件管理会话")
+                Logger.e("FileUpload: 无法保存到目标路径")
             }
         } finally {
-            // 正常收尾：回到 Idle，而不是 Aborted——没有残余数据需要排空
-            uploadState = UploadState.Idle
-            try { session.cacheFile.delete() } catch (_: Exception) {}
+            uploadState = if (saved) UploadState.Idle else UploadState.Aborted
+            session.abort()
         }
     }
 
-    /** 中止当前上传，并进入排空残余数据的状态（见 [UploadAbortRecovery]）。 */
+    /** 中止上传；本会话后续所有入站帧只排空，重新打开文件管理器后才能接收新指令。 */
     private fun abortUploadSession() {
-        releaseActiveSession()
-        uploadState = UploadState.Aborted(lastFrameNanos = nanoTime())
-    }
-
-    /** 关闭并删除进行中上传的缓存文件（若有）；不改变状态。 */
-    private fun releaseActiveSession() {
-        (uploadState as? UploadState.Active)?.session?.abort()
+        val session = (uploadState as? UploadState.Active)?.session
+        uploadState = UploadState.Aborted
+        session?.abort()
     }
 
     private suspend fun moveFileToTarget(sourceFile: File, targetPath: String): Boolean {
@@ -464,6 +430,7 @@ class FileManager internal constructor(
         // 第一次尝试：Java API
         try {
             val target = File(targetPath)
+            if (target.isDirectory) return false
             target.parentFile?.mkdirs()
             withContext(Dispatchers.IO) {
                 sourceFile.copyTo(target, overwrite = true)
@@ -535,10 +502,10 @@ class FileManager internal constructor(
                 RootShell.openCommandInputStream("cat ${shellEscape(path)}")
             }
             if (privilegedInput != null) {
-                Logger.i("FileManager: 使用集中授权的 Root/Shizuku Shell 读取文件: $path")
+                Logger.i("FileManager: 使用已授权高权限读取文件")
                 return privilegedInput
             }
-            Logger.i("FileManager: 高权限读取不可用，回退到 Java IO: $path")
+            Logger.i("FileManager: 高权限读取不可用，回退到 Java IO")
         }
 
         // ── 策略 2：Java FileInputStream ────────────────────────────────
@@ -606,17 +573,15 @@ class FileManager internal constructor(
     }
 
     private suspend fun sendError(message: String) {
-        Logger.e("FileManager: 发送错误: $message (StreamID=$streamId)")
+        Logger.e("FileManager: 向面板报告操作失败")
         val errorBytes = ERROR_IDENTIFIER + message.toByteArray(Charsets.UTF_8)
         sendData(errorBytes)
     }
 
     private fun close() {
         if (closed.getAndSet(true)) return
-        Logger.i("FileManager: 正在关闭文件管理器会话 (StreamID=$streamId)")
-        // 会话到此为止，不需要排空残余数据：直接回到 Idle
-        releaseActiveSession()
-        uploadState = UploadState.Idle
+        Logger.i("FileManager: 正在关闭文件管理会话")
+        abortUploadSession()
         outputChannel.close()
     }
 
@@ -626,43 +591,6 @@ class FileManager internal constructor(
 internal interface DownloadFileSource {
     suspend fun size(path: String): Long?
     suspend fun open(path: String): InputStream?
-}
-
-/**
- * 上传中止后，如何重新与面板对齐。
- *
- * ## 为什么需要它
- * 分发逻辑靠"当前有没有上传会话"来决定把一帧当文件内容还是当操作码。上传被拒
- * （超量）或写盘失败会中止会话，而面板往往已经把整个文件推进了 gRPC 发送缓冲区——
- * 这些残余字节于是被逐块当成操作码，产生大量错误响应和以二进制垃圾为路径的下载请求。
- *
- * ## 判据
- * 协议里没有"这一帧是新指令"的标记，只能靠两个信号一起判断：
- * 1. 首字节是已知操作码；
- * 2. 距上一帧的静默时间超过 [QUIET_PERIOD_NANOS]。
- *
- * 残余块是连续突发，帧间几乎没有空档；真正的新指令来自用户的下一次点击，中间必然有
- * 明显停顿。两个条件同时满足才恢复解释指令，否则继续丢弃。最保险的恢复方式依然是
- * 重建流——那会新建一个 [FileManager]，状态从 Idle 重新开始。
- */
-internal object UploadAbortRecovery {
-
-    /**
-     * 恢复解释指令所需的静默时长。
-     *
-     * 3 秒足以跨过残余突发内部的抖动（同一条 gRPC 流上的连续帧不会隔这么久），
-     * 又不至于让用户在同一条流上重试时长时间没有反应。
-     */
-    const val QUIET_PERIOD_NANOS = 3_000_000_000L
-
-    /** 与 [FileManager] 分发分支一一对应：列目录 / 下载 / 新上传。 */
-    private val COMMAND_OPCODES = setOf(0x00, 0x01, 0x02)
-
-    fun isNewCommandFrame(
-        opcode: Int,
-        idleNanos: Long,
-        quietPeriodNanos: Long = QUIET_PERIOD_NANOS
-    ): Boolean = opcode in COMMAND_OPCODES && idleNanos >= quietPeriodNanos
 }
 
 /**

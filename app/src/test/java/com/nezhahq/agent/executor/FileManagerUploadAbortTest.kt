@@ -24,10 +24,10 @@ import proto.Nezha
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.InputStream
+import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Collections
-import java.util.concurrent.atomic.AtomicLong
 
 /**
  * The dispatcher decides "file content or opcode?" from one piece of state, so what that state says
@@ -42,6 +42,68 @@ class FileManagerUploadAbortTest {
 
     @get:Rule
     val temporaryFolder = TemporaryFolder()
+
+    @Test
+    fun `final save into an existing directory aborts and drains download and upload residue`() = runBlocking {
+        val directory = temporaryFolder.newFolder("directory-target")
+        val original = File(directory, "keep.txt").apply { writeText("original") }
+        val residualTarget = File(temporaryFolder.newFolder("after-save-failure"), "must-not-exist.bin")
+        val context = cacheDirContext()
+        val source = MapDownloadSource(mapOf("legit" to "hello".toByteArray()))
+        val output = Collections.synchronizedList(mutableListOf<ByteArray>())
+        val manager = FileManager(
+            context = context,
+            streamId = "final-save-failure",
+            openIoStream = scriptedSession(
+                frames = listOf(
+                    uploadRequest(directory.absolutePath, 3),
+                    byteArrayOf(7, 8, 9),
+                    downloadRequest("legit"),
+                    uploadRequest(residualTarget.absolutePath, 0)
+                ),
+                expectedOutputFrames = 2,
+                output = output
+            ),
+            downloadSourceOverride = source
+        )
+
+        withTimeout(TEST_TIMEOUT_MS) { manager.run() }
+
+        assertTrue(directory.isDirectory)
+        assertEquals("original", original.readText())
+        assertEquals(emptyList<String>(), source.openedPaths)
+        assertFalse(residualTarget.exists())
+        assertEquals(2, output.size)
+        assertTrue(output[1].startsWith(ERROR_MAGIC))
+        assertTrue(String(output[1], Charsets.UTF_8).contains("重新打开文件管理会话"))
+        assertTrue(context.cacheDir.listFiles().orEmpty().isEmpty())
+    }
+
+    @Test
+    fun `a cache open failure drains residue without logging the failure contents`() = runBlocking {
+        val secret = "private-upload-path-48291"
+        val source = MapDownloadSource(mapOf("legit" to "hello".toByteArray()))
+        val output = Collections.synchronizedList(mutableListOf<ByteArray>())
+        val manager = FileManager(
+            context = object : ContextWrapper(null) {
+                override fun getCacheDir(): File = throw IOException(secret)
+            },
+            streamId = "cannot-open-cache",
+            openIoStream = scriptedSession(
+                frames = listOf(uploadRequest("/target", 4), downloadRequest("legit")),
+                expectedOutputFrames = 2,
+                output = output
+            ),
+            downloadSourceOverride = source
+        )
+
+        withTimeout(TEST_TIMEOUT_MS) { manager.run() }
+
+        assertEquals(emptyList<String>(), source.openedPaths)
+        assertEquals(2, output.size)
+        assertFalse(silentLogger.messages.joinToString().contains(secret))
+        assertTrue(String(output[1], Charsets.UTF_8).contains("重新打开文件管理会话"))
+    }
 
     @Test
     fun `chunks arriving after an aborted upload are not executed as commands`() = runBlocking {
@@ -67,9 +129,7 @@ class FileManagerUploadAbortTest {
                 expectedOutputFrames = 2,
                 output = output
             ),
-            downloadSourceOverride = source,
-            // Time never advances, so the quiet period is never satisfied and nothing resyncs.
-            nanoTime = { 0L }
+            downloadSourceOverride = source
         )
 
         withTimeout(TEST_TIMEOUT_MS) { manager.run() }
@@ -107,8 +167,7 @@ class FileManagerUploadAbortTest {
                     expectedOutputFrames = 2,
                     output = output
                 ),
-                downloadSourceOverride = source,
-                nanoTime = { 0L }
+                downloadSourceOverride = source
             )
 
             withTimeout(TEST_TIMEOUT_MS) { manager.run() }
@@ -121,36 +180,36 @@ class FileManagerUploadAbortTest {
         }
 
     @Test
-    fun `a command arriving after the quiet period is served again`() = runBlocking {
+    fun `delayed residual opcodes never reopen an aborted file session`() = runBlocking {
         val source = MapDownloadSource(mapOf("legit" to "hello".toByteArray()))
         val output = Collections.synchronizedList(mutableListOf<ByteArray>())
-        // Each reading jumps a full quiet period ahead, so the first frame after the abort already
-        // looks like a deliberate new command rather than part of the residual burst.
-        val clock = AtomicLong(0)
+        val target = File(temporaryFolder.newFolder("delayed"), "must-not-exist.bin")
+        val context = cacheDirContext()
         val manager = FileManager(
-            context = cacheDirContext(),
-            streamId = "abort-resync",
+            context = context,
+            streamId = "delayed-residue",
             openIoStream = scriptedSession(
                 frames = listOf(
-                    uploadRequest(targetPath = "/never/written", declaredSize = 4),
+                    uploadRequest("/never/written", declaredSize = 4),
                     ByteArray(8) { 0x41 },
-                    downloadRequest("legit")
+                    listDirRequest("/residual/dir"),
+                    downloadRequest("legit"),
+                    uploadRequest(target.absolutePath, declaredSize = 0)
                 ),
-                expectedOutputFrames = 4,
-                output = output
+                expectedOutputFrames = 2,
+                output = output,
+                delayBeforeResidualMillis = 3_100
             ),
-            downloadSourceOverride = source,
-            nanoTime = { clock.getAndAdd(UploadAbortRecovery.QUIET_PERIOD_NANOS) }
+            downloadSourceOverride = source
         )
 
         withTimeout(TEST_TIMEOUT_MS) { manager.run() }
 
-        // An aborted session must not brick the stream: the dashboard can retry without reopening it.
-        assertEquals(listOf("legit"), source.openedPaths)
-        assertEquals(4, output.size)
-        assertTrue(output[1].startsWith(ERROR_MAGIC))
-        assertTrue(output[2].startsWith(FILE_DATA_MAGIC))
-        assertArrayEquals("hello".toByteArray(), output[3])
+        assertEquals(emptyList<String>(), source.openedPaths)
+        assertFalse(target.exists())
+        assertEquals(2, output.size)
+        assertTrue(String(output[1], Charsets.UTF_8).contains("重新打开文件管理会话"))
+        assertTrue("upload cache was not removed", context.cacheDir.listFiles().orEmpty().isEmpty())
     }
 
     @Test
@@ -181,24 +240,6 @@ class FileManagerUploadAbortTest {
             assertArrayEquals(payload, target.readBytes())
         }
 
-    // ── 恢复判据（纯函数） ─────────────────────────────────────────────────────
-
-    @Test
-    fun `resync needs both a known opcode and a quiet stream`() {
-        val quiet = UploadAbortRecovery.QUIET_PERIOD_NANOS
-
-        // Back-to-back residual chunks: same opcode byte, but no gap.
-        assertFalse(UploadAbortRecovery.isNewCommandFrame(opcode = 0x01, idleNanos = 0))
-        assertFalse(UploadAbortRecovery.isNewCommandFrame(opcode = 0x01, idleNanos = quiet - 1))
-        // A long gap is not enough on its own: binary content can carry any leading byte.
-        assertFalse(UploadAbortRecovery.isNewCommandFrame(opcode = 0xFF, idleNanos = quiet))
-        assertFalse(UploadAbortRecovery.isNewCommandFrame(opcode = 0x03, idleNanos = quiet))
-
-        listOf(0x00, 0x01, 0x02).forEach { opcode ->
-            assertTrue(UploadAbortRecovery.isNewCommandFrame(opcode, idleNanos = quiet))
-        }
-    }
-
     // ── 辅助 ──────────────────────────────────────────────────────────────────
 
     private fun cacheDirContext(): ContextWrapper {
@@ -220,7 +261,8 @@ class FileManagerUploadAbortTest {
     private fun scriptedSession(
         frames: List<ByteArray>,
         expectedOutputFrames: Int,
-        output: MutableList<ByteArray>
+        output: MutableList<ByteArray>,
+        delayBeforeResidualMillis: Long = 0
     ): (Flow<Nezha.IOStreamData>) -> Flow<Nezha.IOStreamData> = { outgoing ->
         channelFlow {
             val outputComplete = CompletableDeferred<Unit>()
@@ -234,7 +276,10 @@ class FileManagerUploadAbortTest {
                 }
             }
             try {
-                frames.forEach { send(dataFrame(it)) }
+                frames.forEachIndexed { index, bytes ->
+                    if (index == 2 && delayBeforeResidualMillis > 0) delay(delayBeforeResidualMillis)
+                    send(dataFrame(bytes))
+                }
                 withTimeout(TEST_TIMEOUT_MS) { outputComplete.await() }
                 delay(SETTLE_MS)
             } finally {
@@ -278,7 +323,7 @@ class FileManagerUploadAbortTest {
     }
 
     private companion object {
-        const val TEST_TIMEOUT_MS = 5_000L
+        const val TEST_TIMEOUT_MS = 10_000L
 
         /** How long a wrongly-executed residual chunk is given to reveal itself. */
         const val SETTLE_MS = 200L
@@ -291,7 +336,6 @@ class FileManagerUploadAbortTest {
 
         val STREAM_MAGIC = byteArrayOf(0xFF.toByte(), 0x05, 0xFF.toByte(), 0x05)
         val ERROR_MAGIC = byteArrayOf(0x4E, 0x45, 0x52, 0x52)
-        val FILE_DATA_MAGIC = byteArrayOf(0x4E, 0x5A, 0x54, 0x44)
         val COMPLETE_MAGIC = byteArrayOf(0x4E, 0x5A, 0x55, 0x50)
     }
 }

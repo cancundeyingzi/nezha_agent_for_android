@@ -1,12 +1,11 @@
 package com.nezhahq.agent.util
 
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.ReceiveChannel
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 
 class DashboardSessionTimeoutException(
     message: String,
-    cause: Throwable
+    cause: Throwable? = null
 ) : RuntimeException(message, cause)
 
 /**
@@ -36,7 +35,8 @@ object DashboardSessionWatchdog {
      * (see `consumeWithIdleRestart`), and sits far above any plausible Dashboard task cadence so an
      * idle agent stops re-opening the stream twice a minute for nothing.
      */
-    const val TASK_IDLE_TIMEOUT_MS = 300_000L
+    // Exec may run for 300s; leave another minute for result transfer and helper cleanup.
+    const val TASK_IDLE_TIMEOUT_MS = 360_000L
     const val STATE_REPORT_INTERVAL_MS = 2_000L
 
     suspend fun <T> callWithin(
@@ -44,14 +44,11 @@ object DashboardSessionWatchdog {
         operationName: String,
         block: suspend () -> T
     ): T {
-        return try {
-            withTimeout(timeoutMs) { block() }
-        } catch (e: TimeoutCancellationException) {
-            throw DashboardSessionTimeoutException(
-                "$operationName timed out after ${timeoutMs}ms",
-                e
-            )
-        }
+        // Only this wrapper's own deadline becomes a Dashboard timeout. Caller timeouts and
+        // cancellation retain their identity, so they cannot accidentally restart a task stream.
+        val completed = withTimeoutOrNull(timeoutMs) { Completed(block()) }
+            ?: throw DashboardSessionTimeoutException("$operationName timed out after ${timeoutMs}ms")
+        return completed.value
     }
 
     suspend fun <T> receiveWithin(
@@ -59,4 +56,6 @@ object DashboardSessionWatchdog {
         timeoutMs: Long,
         streamName: String
     ): T = callWithin(timeoutMs, streamName) { channel.receive() }
+
+    private data class Completed<T>(val value: T)
 }

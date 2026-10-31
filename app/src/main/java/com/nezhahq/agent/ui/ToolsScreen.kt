@@ -35,6 +35,7 @@ import com.nezhahq.agent.MainViewModel
 import com.nezhahq.agent.R
 import com.nezhahq.agent.util.PermissionChecker
 import com.nezhahq.agent.util.PermissionChecker.PermissionKey
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -51,27 +52,27 @@ fun ToolsScreenContent(
     // 权限刷新要读盘（getAllPermissionStatus 内部会读配置存储），必须在 IO 上执行，
     // 故需要一个协程作用域给下面几处“事件驱动的刷新”使用。
     val scope = rememberCoroutineScope()
-
-    // ── 权限状态列表（响应式，自动驱动 UI 重组）──
-    // 初值给空列表 + 未加载标记：组合期不再同步读盘。原实现会在 composition 期调用
-    // getAllPermissionStatus → configRepository.loadAutoStartState()，那是一次会阻塞主线程的存储读取。
-    var permissionList by remember {
-        mutableStateOf<List<PermissionChecker.PermissionItem>>(emptyList())
-    }
-    var permissionsLoaded by remember { mutableStateOf(false) }
-
-    // 统一的权限刷新入口：始终在 IO 线程读盘、回主线程回填 state。
-    // 四处刷新（首次加载 / 返回前台 / 短信授权回调 / 自启开关保存后）都走这里，避免任何一处漏挪回主线程。
+    var permissionList by remember { mutableStateOf<List<PermissionChecker.PermissionItem>>(emptyList()) }
+    var permissionsLoading by remember { mutableStateOf(true) }
+    var permissionError by remember { mutableStateOf<String?>(null) }
+    // Includes a configuration read: never call from composition or an activity callback directly.
     val refreshPermissions: () -> Unit = {
         scope.launch {
-            val latest = withContext(Dispatchers.IO) {
-                PermissionChecker.getAllPermissionStatus(context)
+            permissionsLoading = true
+            try {
+                permissionList = withContext(Dispatchers.IO) {
+                    PermissionChecker.getAllPermissionStatus(context)
+                }
+                permissionError = null
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                permissionError = "权限状态读取失败，请重新进入此页面重试"
+            } finally {
+                permissionsLoading = false
             }
-            permissionList = latest
-            permissionsLoaded = true
         }
     }
-
     // 首次进入时异步加载一次。key = Unit：只在进入组合时触发，不因重组反复重启。
     LaunchedEffect(Unit) { refreshPermissions() }
 
@@ -96,7 +97,7 @@ fun ToolsScreenContent(
     val smsPermLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
-        // 刷新全部权限状态（同样在 IO 上执行）
+        // 刷新全部权限状态
         refreshPermissions()
         if (granted) {
             Toast.makeText(context, "短信权限已授予，可在终端中使用 @agent sms", Toast.LENGTH_SHORT).show()
@@ -160,7 +161,7 @@ fun ToolsScreenContent(
                 onValueChange = { vm.simulatorServer = it },
                 label = "模拟器服务端 IP 或域名",
                 modifier = Modifier.fillMaxWidth(),
-                enabled = !vm.isConfigWriteInProgress
+                enabled = !vm.isConfigWriteInProgress && !vm.isConfigLoading && !vm.isResettingConfigStorage
             )
             Spacer(modifier = Modifier.height(12.dp))
             EtherTextField(
@@ -169,7 +170,7 @@ fun ToolsScreenContent(
                 label = "模拟器 gRPC 端口",
                 modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                enabled = !vm.isConfigWriteInProgress
+                enabled = !vm.isConfigWriteInProgress && !vm.isConfigLoading && !vm.isResettingConfigStorage
             )
             Spacer(modifier = Modifier.height(12.dp))
             EtherTextField(
@@ -177,7 +178,7 @@ fun ToolsScreenContent(
                 onValueChange = { vm.simulatorSecret = it },
                 label = "模拟器客户端密钥 (Secret)",
                 modifier = Modifier.fillMaxWidth(),
-                enabled = !vm.isConfigWriteInProgress
+                enabled = !vm.isConfigWriteInProgress && !vm.isConfigLoading && !vm.isResettingConfigStorage
             )
             Spacer(modifier = Modifier.height(12.dp))
             EtherTextField(
@@ -186,7 +187,7 @@ fun ToolsScreenContent(
                 label = "模拟器并发线程数 (1-${SimulatedDeviceConfig.MAX_THREAD_COUNT})",
                 modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                enabled = !vm.isConfigWriteInProgress
+                enabled = !vm.isConfigWriteInProgress && !vm.isConfigLoading && !vm.isResettingConfigStorage
             )
             Spacer(modifier = Modifier.height(8.dp))
             EtherToggleRow(
@@ -195,7 +196,7 @@ fun ToolsScreenContent(
                 title = "使用 TLS 加密连接",
                 description = "仅影响娱乐模拟设备，不会修改真实探针连接配置",
                 highlightWhenChecked = false,
-                enabled = !vm.isConfigWriteInProgress
+                enabled = !vm.isConfigWriteInProgress && !vm.isConfigLoading && !vm.isResettingConfigStorage
             )
             Spacer(modifier = Modifier.height(8.dp))
             Column(
@@ -267,26 +268,10 @@ fun ToolsScreenContent(
                 modifier = Modifier.padding(bottom = 8.dp)
             )
 
-            if (!permissionsLoaded) {
-                // 权限状态尚在 IO 线程加载中，先显示加载态；组合期不再阻塞读盘。
-                Row(
-                    modifier = Modifier.padding(vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(16.dp),
-                        strokeWidth = 2.dp,
-                        color = LgPrimary
-                    )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Text(
-                        "正在检测权限状态…",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = LgOnSurfaceVariant
-                    )
-                }
+            if (permissionsLoading) {
+                Text("正在检测权限状态…", style = MaterialTheme.typography.bodySmall)
             }
-
+            permissionError?.let { Text(it, color = LgError, style = MaterialTheme.typography.bodySmall) }
             permissionList.forEach { item ->
                 Spacer(modifier = Modifier.height(4.dp))
                 PermissionStatusRow(
@@ -331,7 +316,6 @@ fun ToolsScreenContent(
                             }
                             PermissionKey.AUTO_START -> {
                                 vm.toggleAutoStart(!item.granted) {
-                                    // 保存成功回调在主线程，刷新仍走统一的 IO 入口。
                                     refreshPermissions()
                                 }
                             }

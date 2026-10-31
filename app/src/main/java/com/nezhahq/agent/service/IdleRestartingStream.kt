@@ -2,16 +2,23 @@ package com.nezhahq.agent.service
 
 import com.nezhahq.agent.util.DashboardSessionTimeoutException
 import com.nezhahq.agent.util.DashboardSessionWatchdog
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Consumes a stream until cancelled, replacing *only the stream* when it falls silent.
  *
  * The point is what an idle deadline is allowed to reach. [openStream] is called inside a private
- * [coroutineScope], so the producer it launches — and nothing else — is what an expiry tears down;
- * work [onMessage] started elsewhere keeps running across the replacement. That is the difference
+ * [coroutineScope], so its producer and any work installed by [onStreamStarted] end on expiry;
+ * work [onMessage] starts in an outer scope keeps running across the replacement. That is the difference
  * between rebuilding a task stream and rebuilding a connection: an idle requestTask stream used to
  * take the metrics heartbeat and every live terminal, NAT tunnel and file transfer with it.
  *
@@ -33,28 +40,88 @@ internal suspend fun <T> consumeWithIdleRestart(
     streamName: String,
     openStream: CoroutineScope.() -> ReceiveChannel<T>,
     onIdleRestart: (DashboardSessionTimeoutException) -> Unit = {},
+    onStreamStarted: suspend (CoroutineScope) -> Unit = {},
+    onStreamStopped: suspend () -> Unit = {},
+    streamStopTimeoutMillis: Long = 5_000L,
+    nanoTime: () -> Long = System::nanoTime,
     onMessage: suspend (T) -> Unit
 ): Nothing {
+    require(idleTimeoutMillis > 0) { "idleTimeoutMillis must be positive" }
+    require(streamStopTimeoutMillis > 0) { "streamStopTimeoutMillis must be positive" }
     while (true) {
-        coroutineScope {
-            val incoming = openStream()
-            try {
-                while (true) {
-                    val message = try {
-                        DashboardSessionWatchdog.receiveWithin(
-                            incoming,
-                            idleTimeoutMillis,
-                            streamName
+        currentCoroutineContext().ensureActive()
+        var primaryFailure: Throwable? = null
+        try {
+            coroutineScope {
+                try {
+                    onStreamStarted(this)
+                    val incoming = openStream()
+                    try {
+                        var lastReceivedNanos = nanoTime()
+                        fun remainingMillis(): Long {
+                            val elapsed = (nanoTime() - lastReceivedNanos).coerceAtLeast(0) / 1_000_000
+                            return (idleTimeoutMillis - elapsed).coerceAtLeast(0)
+                        }
+                        fun idle() = DashboardSessionTimeoutException(
+                            "$streamName timed out after ${idleTimeoutMillis}ms without receiving a task"
                         )
-                    } catch (idle: DashboardSessionTimeoutException) {
-                        onIdleRestart(idle)
-                        break
+                        while (true) {
+                            // Only these withTimeoutOrNull deadlines mean idle. Handler timeouts,
+                            // caller cancellation and all other failures keep their own identity.
+                            val received = withTimeoutOrNull(remainingMillis()) { Received(incoming.receive()) }
+                            if (received == null) {
+                                onIdleRestart(idle())
+                                break
+                            }
+                            lastReceivedNanos = nanoTime()
+                            val handled = withTimeoutOrNull(remainingMillis()) {
+                                onMessage(received.value)
+                                true
+                            }
+                            if (handled == null) {
+                                onIdleRestart(idle())
+                                break
+                            }
+                        }
+                    } finally {
+                        incoming.cancel()
                     }
-                    onMessage(message)
+                } finally {
+                    // New stream-bound work (for example MCP) must end with this registration.
+                    // Legacy terminal/NAT/file sessions are deliberately owned by the outer scope.
+                    coroutineContext.cancelChildren()
                 }
-            } finally {
-                incoming.cancel()
+            }
+        } catch (failure: Throwable) {
+            primaryFailure = failure
+            throw failure
+        } finally {
+            // coroutineScope has joined the old producer and every stream-bound task before this
+            // hook runs. Finish registry/result cleanup before another registration can open.
+            try {
+                withContext(NonCancellable) {
+                    DashboardSessionWatchdog.callWithin(streamStopTimeoutMillis, "$streamName cleanup") {
+                        onStreamStopped()
+                    }
+                }
+            } catch (cleanupFailure: Throwable) {
+                val original = primaryFailure
+                if (original != null) {
+                    if (cleanupFailure !== original) original.addSuppressed(cleanupFailure)
+                } else {
+                    // Cancellation may arrive while the NonCancellable stop hook is running.
+                    // Preserve it too, rather than turning shutdown into a reconnectable timeout.
+                    try {
+                        currentCoroutineContext().ensureActive()
+                    } catch (cancelled: CancellationException) {
+                        if (cleanupFailure !== cancelled) cancelled.addSuppressed(cleanupFailure)
+                        throw cancelled
+                    }
+                    throw cleanupFailure
+                }
             }
         }
     }
 }
+
+private data class Received<T>(val value: T)

@@ -12,8 +12,9 @@ android {
         applicationId = "com.nezhahq.agent"
         minSdk = 23
         targetSdk = 35
-        versionCode = 385
-        versionName = "A0.10.1"
+        versionCode = 386
+        versionName = "A0.11.0-r1"
+        manifestPlaceholders["appLabel"] = "@string/app_name"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -27,6 +28,16 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+        create("r1test") {
+            // Exercise the release R8 rules in a debuggable, separately installable package.
+            initWith(getByName("release"))
+            applicationIdSuffix = ".r1test"
+            manifestPlaceholders["appLabel"] = "哪吒探针 R1测试"
+            signingConfig = signingConfigs.getByName("debug")
+            isDebuggable = true
+            isMinifyEnabled = true
+            matchingFallbacks += listOf("debug")
         }
     }
     compileOptions {
@@ -44,17 +55,6 @@ android {
         // unit test cannot pass against behaviour the device would never produce. Tests whose code
         // path logs need SilentLoggerRule; see its documentation.
         unitTests.isReturnDefaultValues = false
-    }
-    lint {
-        // TEMPORARY, and only so CI can start running lint at all. The manifest declares several
-        // restricted permissions the agent genuinely needs (QUERY_ALL_PACKAGES, READ_SMS,
-        // MANAGE_EXTERNAL_STORAGE, BATTERY_STATS, PACKAGE_USAGE_STATS), each already carrying a
-        // reviewed `tools:ignore`; turning lint on in blocking mode before anyone has seen the
-        // report would fail the first build for findings nobody has triaged.
-        //
-        // Next step is to read one CI run's report, fix or baseline what it found, then delete
-        // this line so a new lint error breaks the build like a failing test does.
-        abortOnError = false
     }
     composeOptions {
         kotlinCompilerExtensionVersion = libs.versions.composeCompiler.get()
@@ -89,6 +89,9 @@ dependencies {
 
     // OKHTTP for Trace and Tasks
     implementation(libs.okhttp)
+
+    // MCP uses explicit streaming adapters, never reflective DTO serialization.
+    implementation(libs.gson)
 
     // gRPC & Protobuf
     implementation(libs.grpc.okhttp)

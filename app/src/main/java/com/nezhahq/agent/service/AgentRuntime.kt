@@ -13,15 +13,25 @@ import com.nezhahq.agent.collector.SystemInfoCollector
 import com.nezhahq.agent.collector.SystemStateCollector
 import com.nezhahq.agent.core.model.AgentConfig
 import com.nezhahq.agent.core.model.RemoteCapabilities
+import com.nezhahq.agent.core.mcp.McpPolicy
+import com.nezhahq.agent.core.mcp.McpProtocolVersion
+import com.nezhahq.agent.core.mcp.McpTaskFamily
 import com.nezhahq.agent.core.task.RemoteCapabilityPolicy
 import com.nezhahq.agent.core.task.TaskTypes
 import com.nezhahq.agent.executor.FileManager
 import com.nezhahq.agent.executor.NatManager
 import com.nezhahq.agent.executor.TaskExecutor
 import com.nezhahq.agent.executor.TerminalManager
+import com.nezhahq.agent.executor.requireValidNatTarget
 import com.nezhahq.agent.grpc.GrpcConnection
 import com.nezhahq.agent.grpc.GrpcConnectionState
 import com.nezhahq.agent.grpc.GrpcTransportMode
+import com.nezhahq.agent.grpc.ManagedGrpcConnection
+import com.nezhahq.agent.mcp.McpSession
+import com.nezhahq.agent.mcp.McpTaskBackend
+import com.nezhahq.agent.mcp.exec.McpExecBackend
+import com.nezhahq.agent.mcp.fs.McpFsBackend
+import com.nezhahq.agent.mcp.privileged.McpHelperLaunchers
 import com.nezhahq.agent.service.keepalive.KeepAliveController
 import com.nezhahq.agent.util.DashboardSessionWatchdog
 import com.nezhahq.agent.util.Logger
@@ -50,7 +60,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.produceIn
-import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -139,6 +148,16 @@ internal class AgentRuntime(
      * would otherwise leave several probes racing to describe networks that are already gone.
      */
     private val geoIpReportJob = AtomicReference<Job?>(null)
+    private val currentMcpSession = AtomicReference<McpSession?>()
+    private val mcpLauncher = McpHelperLaunchers.select(appContext, config.rootMode)
+    private val mcpExec = McpExecBackend(mcpLauncher)
+    private val mcpFs = McpFsBackend(mcpLauncher)
+    private val mcpBackend = McpTaskBackend { task, snapshot, reserveResult ->
+        when (McpPolicy.family(task.type)) {
+            McpTaskFamily.EXEC -> mcpExec.execute(task, snapshot, reserveResult = reserveResult)
+            else -> mcpFs.execute(task, snapshot, reserveResult = reserveResult)
+        }
+    }
 
     private var state = LifecycleState.NEW
 
@@ -199,6 +218,7 @@ internal class AgentRuntime(
 
     override suspend fun updateCapabilities(capabilities: RemoteCapabilities) {
         this.capabilities.set(capabilities)
+        currentMcpSession.get()?.revokeDisabled(capabilities)
     }
 
     /**
@@ -315,7 +335,7 @@ internal class AgentRuntime(
     private suspend fun reportInitialDashboardInfo(stub: NezhaServiceCoroutineStub) {
         val hostInfo = SystemInfoCollector.getHostInfo(
             context = appContext,
-            appVersion = getAppVersionName(),
+            appVersion = McpProtocolVersion.hostVersion(getAppVersionName()),
             gpuCollector = gpuCollector,
             isRootMode = RootShell.isAuthorized()
         )
@@ -387,34 +407,52 @@ internal class AgentRuntime(
      * the state stream under one non-supervising scope — without the metrics heartbeat going down
      * with it. Real stream failures still propagate and rebuild the connection.
      *
-     * A result already taken out of the result channel by the cancelled collector is lost when the
-     * stream is replaced. That is a task result the Dashboard will not see, accepted because the
-     * deadline only expires after minutes of total silence, which is also minutes of idle workers.
+     * A legacy result already taken out of its channel can be lost when the stream is replaced.
+     * Legacy work remains in this outer scope; MCP tasks and result reservations end with their
+     * own registration, including when the idle deadline expires during handler backpressure.
      */
     private suspend fun handleTaskStream(stub: NezhaServiceCoroutineStub): Unit = coroutineScope {
         val results = Channel<TaskResult>(TASK_RESULT_BUFFER_CAPACITY)
         val shortTasks = Channel<Task>(SHORT_TASK_QUEUE_CAPACITY)
         val streamSessions = createStreamSessionRegistry()
+        // Workers and long sessions belong to this scope, outside the replaceable task producer.
         val sessionScope = this
         val workers = List(SHORT_TASK_WORKER_COUNT) {
             launch {
                 for (task in shortTasks) executeShortTask(task, results)
             }
         }
+        var registration: McpSession? = null
         try {
             consumeWithIdleRestart(
                 idleTimeoutMillis = DashboardSessionWatchdog.TASK_IDLE_TIMEOUT_MS,
                 streamName = "RequestTask stream",
+                onStreamStarted = { streamScope ->
+                    McpSession(streamScope, capabilities::get, mcpBackend).also {
+                        registration = it
+                        currentMcpSession.set(it)
+                    }
+                },
                 openStream = {
-                    stub.requestTask(results.receiveAsFlow())
+                    // Capture this registration; asynchronous work never looks up its successor.
+                    val mcp = checkNotNull(registration)
+                    stub.requestTask(mcp.outgoingWith(results))
                         .buffer(TASK_INPUT_BUFFER_CAPACITY)
                         .produceIn(this)
                 },
+                onStreamStopped = {
+                    registration?.let { stopped ->
+                        currentMcpSession.compareAndSet(stopped, null)
+                        stopped.close()
+                    }
+                    registration = null
+                },
                 onIdleRestart = {
-                    Logger.i("AgentRuntime: 任务流长时间空闲，仅重建任务流，连接与会话保持不变")
+                    Logger.i("AgentRuntime: 任务流空闲，仅重建任务流")
                 }
             ) { task ->
-                routeIncomingTask(sessionScope, stub, task, shortTasks, results, streamSessions)
+                routeIncomingTask(sessionScope, stub, task, shortTasks, results, streamSessions,
+                    checkNotNull(registration))
             }
         } finally {
             workers.forEach(Job::cancel)
@@ -443,8 +481,13 @@ internal class AgentRuntime(
         task: Task,
         shortTasks: SendChannel<Task>,
         results: SendChannel<TaskResult>,
-        streamSessions: StreamSessionRegistry
+        streamSessions: StreamSessionRegistry,
+        mcpSession: McpSession
     ) {
+        if (McpPolicy.family(task.type) != null) {
+            mcpSession.handle(task)
+            return
+        }
         RemoteCapabilityPolicy.denialReason(task.type, capabilities.get())?.let { reason ->
             reportTaskFailure(task, reason, results)
             return
@@ -512,6 +555,7 @@ internal class AgentRuntime(
                 require(host.toByteArray(Charsets.UTF_8).size <= MAX_NAT_HOST_BYTES) {
                     "NAT Host exceeds the $MAX_NAT_HOST_BYTES-byte limit."
                 }
+                requireValidNatTarget(host)
                 StreamTaskRequest.Nat(task, streamId, host)
             }
             TaskTypes.FILE_MANAGER -> StreamTaskRequest.FileManager(task, streamId)
@@ -556,7 +600,7 @@ internal class AgentRuntime(
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (exception: Exception) {
-            Logger.e("$taskName 任务执行失败 (TaskID=${task.id}, Type=${task.type})", exception)
+            Logger.e("$taskName 任务执行失败 (TaskID=${task.id}, Error=${exception.javaClass.simpleName})")
         }
     }
 
@@ -688,7 +732,7 @@ internal class AgentRuntime(
     private companion object {
         const val SHORT_TASK_WORKER_COUNT = 8
         const val SHORT_TASK_QUEUE_CAPACITY = 64
-        const val TASK_INPUT_BUFFER_CAPACITY = 16
+        const val TASK_INPUT_BUFFER_CAPACITY = 0
         const val TASK_RESULT_BUFFER_CAPACITY = 8
         const val MAX_STREAM_SESSIONS = 36
         const val MAX_TERMINAL_SESSIONS = 2

@@ -70,6 +70,15 @@ class HostPortTest {
         assertInvalid(HostPort.parse("example.com"))
     }
 
+    @Test
+    fun `default ports and bracket hosts receive the same validation`() {
+        assertInvalid(HostPort.parse("example.com", defaultPort = 0))
+        assertInvalid(HostPort.parse("[::1]", defaultPort = 65536))
+        assertInvalid(HostPort.parse("[example.com]:80"))
+        assertInvalid(HostPort.parse("   :80"))
+        assertInvalid(HostPort.parse("example.com]:80"))
+    }
+
     // ── 非法端口 ───────────────────────────────────────────────────────────────
 
     @Test
@@ -108,6 +117,8 @@ class HostPortTest {
     @Test
     fun `of validates an already split host and port`() {
         assertParsed("example.com", 443, HostPort.of("example.com", 443))
+        assertParsed("::1", 443, HostPort.of("[::1]", 443))
+        assertParsed("::1", 443, HostPort.of("::1", 443))
         assertInvalid(HostPort.of("", 443))
         assertInvalid(HostPort.of("   ", 443))
         assertInvalid(HostPort.of("example.com", 0))

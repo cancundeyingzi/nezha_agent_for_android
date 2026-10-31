@@ -277,7 +277,7 @@ class AgentCommandHandler(private val context: Context) {
                 }
             }
         } catch (e: Exception) {
-            Logger.e("AgentCommandHandler: 短信查询失败", e)
+            Logger.e("AgentCommandHandler: 短信查询失败 (Error=${e.javaClass.simpleName})")
             "❌ 短信查询失败: ${e.message}\r\n"
         }
     }
@@ -298,11 +298,11 @@ class AgentCommandHandler(private val context: Context) {
 
         when (val result = KeepAliveAccessibilityService.saveScreenshot(targetPath)) {
             is KeepAliveAccessibilityService.ScreenshotSaveResult.Success -> {
-                Logger.i("AgentCommandHandler: 无障碍截图已保存: ${result.path}")
+                Logger.i("AgentCommandHandler: 无障碍截图已保存")
                 return formatScreenshotSuccess(result.path, result.bytes, "无障碍服务")
             }
             is KeepAliveAccessibilityService.ScreenshotSaveResult.Failure -> {
-                Logger.i("AgentCommandHandler: 无障碍截图不可用，准备尝试高权限兜底: ${result.reason}")
+                Logger.i("AgentCommandHandler: 无障碍截图不可用，尝试已授权高权限兜底")
                 val rootMode = RootShell.isAuthorized()
                 if (!rootMode) {
                     return buildString {
@@ -318,7 +318,7 @@ class AgentCommandHandler(private val context: Context) {
 
                 return when (val shellResult = captureScreenshotViaShell(targetPath)) {
                     is ShellScreenshotResult.Success -> {
-                        Logger.i("AgentCommandHandler: screencap 截图已保存: ${shellResult.path}")
+                        Logger.i("AgentCommandHandler: screencap 截图已保存")
                         formatScreenshotSuccess(shellResult.path, shellResult.bytes, "Root/Shizuku screencap")
                     }
                     is ShellScreenshotResult.Failure -> buildString {

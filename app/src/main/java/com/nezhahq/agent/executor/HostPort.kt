@@ -38,6 +38,7 @@ internal object HostPort {
             // close <= 1 同时覆盖"没有右括号"和"[]"（主机为空）两种畸形输入
             if (close <= 1) return malformed(value)
             val host = value.substring(1, close)
+            if (':' !in host) return malformed(value)
             val rest = value.substring(close + 1)
             return when {
                 rest.isEmpty() -> withDefaultPort(host, defaultPort, value)
@@ -70,22 +71,39 @@ internal object HostPort {
      * 校验一份已经拆开的主机/端口（例如来自 JSON 字段），使结构化来源与字符串来源
      * 走同一套范围检查，不会出现"JSON 写 port=0 就静默连不上"。
      */
-    fun of(host: String, port: Int): Result = when {
-        host.isBlank() -> Result.Invalid("主机名为空")
-        port !in VALID_PORTS -> Result.Invalid("端口号超出范围: $port")
-        else -> Result.Parsed(host, port)
+    fun of(host: String, port: Int): Result {
+        val normalizedHost = if (host.startsWith("[") && host.endsWith("]") && ':' in host) {
+            host.substring(1, host.length - 1)
+        } else {
+            host
+        }
+        return when {
+            normalizedHost.isBlank() -> Result.Invalid("主机名为空")
+            normalizedHost.any { it.isWhitespace() || it == '[' || it == ']' || it == '/' } ->
+                Result.Invalid("无效的主机名")
+            port !in VALID_PORTS -> Result.Invalid("端口号超出范围: $port")
+            else -> Result.Parsed(normalizedHost, port)
+        }
     }
 
     private fun parsePort(host: String, portText: String): Result {
         // toIntOrNull 同时挡下非数字和超出 Int 范围的输入
+        if (portText.any { !it.isDigit() }) return Result.Invalid("无效的端口号: $portText")
         val port = portText.toIntOrNull() ?: return Result.Invalid("无效的端口号: $portText")
         if (port !in VALID_PORTS) return Result.Invalid("端口号超出范围: $port")
-        return Result.Parsed(host, port)
+        return of(host, port)
     }
 
     private fun withDefaultPort(host: String, defaultPort: Int?, original: String): Result =
-        if (defaultPort == null) malformed(original) else Result.Parsed(host, defaultPort)
+        if (defaultPort == null) malformed(original) else of(host, defaultPort)
 
     private fun malformed(value: String): Result =
         Result.Invalid("无效的 Host 格式: $value（期望格式: host:port）")
 }
+
+/** NAT has no default target port. Validate before launching a session so callers can reject it. */
+internal fun requireValidNatTarget(value: String): HostPort.Result.Parsed =
+    when (val result = HostPort.parse(value)) {
+        is HostPort.Result.Parsed -> result
+        is HostPort.Result.Invalid -> throw IllegalArgumentException("Invalid NAT target: ${result.reason}")
+    }

@@ -1,9 +1,14 @@
 package com.nezhahq.agent.service
 
+import com.nezhahq.agent.util.DashboardSessionTimeoutException
+import com.nezhahq.agent.util.DashboardSessionWatchdog
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
@@ -12,15 +17,270 @@ import kotlinx.coroutines.flow.produceIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
  * The contract that keeps an idle task stream from taking a whole connection with it.
  */
 class IdleRestartingStreamTest {
+
+    @Test
+    fun idleDeadlineAlsoExpiresWhileTheMessageHandlerIsBackpressured() = runBlocking {
+        val handlerEntered = CompletableDeferred<Unit>()
+        val handlerStopped = CompletableDeferred<Unit>()
+        val replacementOpened = CompletableDeferred<Unit>()
+        var opens = 0
+        val consumer = launch {
+            consumeWithIdleRestart<String>(
+                idleTimeoutMillis = SHORT_IDLE_EXPIRY_MILLIS,
+                streamName = "backpressured stream",
+                openStream = {
+                    val generation = ++opens
+                    if (generation == 2) replacementOpened.complete(Unit)
+                    flow<String> {
+                        if (generation == 1) emit("blocked")
+                        awaitCancellation()
+                    }.produceIn(this)
+                }
+            ) {
+                handlerEntered.complete(Unit)
+                try { awaitCancellation() } finally { handlerStopped.complete(Unit) }
+            }
+        }
+        try {
+            withTimeout(TEST_TIMEOUT_MILLIS) { handlerEntered.await(); replacementOpened.await() }
+            assertTrue(handlerStopped.isCompleted)
+        } finally { consumer.cancelAndJoin() }
+    }
+
+    @Test
+    fun handlerTimeConsumesTheSameDeadlineAsTheFollowingReceive() = runBlocking {
+        var nanos = 0L
+        var opens = 0
+        val replacementOpened = CompletableDeferred<Unit>()
+        val consumer = launch {
+            consumeWithIdleRestart<String>(
+                idleTimeoutMillis = NO_IDLE_EXPIRY_MILLIS,
+                streamName = "shared deadline",
+                nanoTime = { nanos },
+                openStream = {
+                    val generation = ++opens
+                    if (generation == 2) replacementOpened.complete(Unit)
+                    flow<String> {
+                        if (generation == 1) emit("work")
+                        awaitCancellation()
+                    }.produceIn(this)
+                }
+            ) { nanos += NO_IDLE_EXPIRY_MILLIS * 1_000_000 }
+        }
+        try {
+            withTimeout(TEST_TIMEOUT_MILLIS) { replacementOpened.await() }
+            assertTrue(opens >= 2)
+        } finally { consumer.cancelAndJoin() }
+    }
+
+    @Test
+    fun aHandlerDashboardTimeoutIsNotMistakenForTheInternalIdleDeadline() {
+        var opens = 0
+        val failure = assertThrows(DashboardSessionTimeoutException::class.java) {
+            runBlocking {
+                consumeWithIdleRestart<String>(
+                    idleTimeoutMillis = NO_IDLE_EXPIRY_MILLIS,
+                    streamName = "handler failure",
+                    openStream = {
+                        opens++
+                        flow { emit("work"); awaitCancellation() }.produceIn(this)
+                    }
+                ) { throw DashboardSessionTimeoutException("handler's own timeout") }
+            }
+        }
+        assertEquals("handler's own timeout", failure.message)
+        assertEquals(1, opens)
+    }
+
+    @Test
+    fun aHandlerCoroutineTimeoutPropagatesWithoutRestartingTheStream() {
+        var opens = 0
+        assertThrows(kotlinx.coroutines.TimeoutCancellationException::class.java) {
+            runBlocking {
+                consumeWithIdleRestart<String>(
+                    idleTimeoutMillis = NO_IDLE_EXPIRY_MILLIS,
+                    streamName = "handler timeout",
+                    openStream = {
+                        opens++
+                        flow { emit("work"); awaitCancellation() }.produceIn(this)
+                    }
+                ) { withTimeout(SHORT_IDLE_EXPIRY_MILLIS) { awaitCancellation() } }
+            }
+        }
+        assertEquals(1, opens)
+    }
+
+    @Test
+    fun cancellationArrivingDuringAnIdleStopHookStillPreventsReplacement() = runBlocking {
+        val stopHookEntered = CompletableDeferred<Unit>()
+        val observedFailure = CompletableDeferred<Throwable>()
+        val original = CancellationException("cancel during cleanup")
+        var opens = 0
+        val consumer = launch {
+            try {
+                consumeWithIdleRestart<String>(
+                    idleTimeoutMillis = SHORT_IDLE_EXPIRY_MILLIS,
+                    streamName = "test stream",
+                    openStream = {
+                        opens++
+                        flow<String> { awaitCancellation() }.produceIn(this)
+                    },
+                    onStreamStopped = {
+                        stopHookEntered.complete(Unit)
+                        awaitCancellation()
+                    },
+                    streamStopTimeoutMillis = 200
+                ) { }
+            } catch (failure: Throwable) {
+                observedFailure.complete(failure)
+                throw failure
+            }
+        }
+        withTimeout(TEST_TIMEOUT_MILLIS) { stopHookEntered.await() }
+        consumer.cancel(original)
+
+        val failure = withTimeout(TEST_TIMEOUT_MILLIS) { observedFailure.await() }
+        withTimeout(TEST_TIMEOUT_MILLIS) { consumer.join() }
+
+        assertCancellationAndCleanupFailure(original, failure)
+        assertEquals(1, opens)
+    }
+
+    @Test
+    fun aStopHookTimeoutPreservesTheOriginalExternalCancellation() = runBlocking {
+        val opened = CompletableDeferred<Unit>()
+        val observedFailure = CompletableDeferred<Throwable>()
+        val original = CancellationException("external cancellation")
+        var opens = 0
+        val consumer = launch {
+            try {
+                consumeWithIdleRestart<String>(
+                    idleTimeoutMillis = NO_IDLE_EXPIRY_MILLIS,
+                    streamName = "test stream",
+                    openStream = {
+                        opens++
+                        opened.complete(Unit)
+                        flow<String> { awaitCancellation() }.produceIn(this)
+                    },
+                    onStreamStopped = { awaitCancellation() },
+                    streamStopTimeoutMillis = SHORT_IDLE_EXPIRY_MILLIS
+                ) { }
+            } catch (failure: Throwable) {
+                observedFailure.complete(failure)
+                throw failure
+            }
+        }
+        withTimeout(TEST_TIMEOUT_MILLIS) { opened.await() }
+
+        consumer.cancel(original)
+        val failure = withTimeout(TEST_TIMEOUT_MILLIS) { observedFailure.await() }
+        withTimeout(TEST_TIMEOUT_MILLIS) { consumer.join() }
+
+        assertCancellationAndCleanupFailure(original, failure)
+        assertEquals(1, opens)
+    }
+
+    @Test
+    fun aStalledStopHookHasABoundAndPreventsANewRegistration() {
+        var opens = 0
+        assertThrows(DashboardSessionTimeoutException::class.java) {
+            runBlocking {
+                withTimeout(TEST_TIMEOUT_MILLIS) {
+                    consumeWithIdleRestart<String>(
+                        idleTimeoutMillis = SHORT_IDLE_EXPIRY_MILLIS,
+                        streamName = "test stream",
+                        openStream = {
+                            opens++
+                            flow<String> { awaitCancellation() }.produceIn(this)
+                        },
+                        onStreamStopped = { awaitCancellation() },
+                        streamStopTimeoutMillis = SHORT_IDLE_EXPIRY_MILLIS
+                    ) { }
+                }
+            }
+        }
+        assertEquals(1, opens)
+    }
+
+    @Test
+    fun replacementWaitsForStreamBoundWorkAndTheStopHook() = runBlocking {
+        val opened = AtomicInteger()
+        val cleanupStarted = CompletableDeferred<Unit>()
+        val releaseCleanup = CompletableDeferred<Unit>()
+        val secondOpened = CompletableDeferred<Unit>()
+        val events = CopyOnWriteArrayList<String>()
+        var generation = 0
+        val consumer = launch {
+            consumeWithIdleRestart<String>(
+                idleTimeoutMillis = SHORT_IDLE_EXPIRY_MILLIS,
+                streamName = "test stream",
+                onStreamStarted = { streamScope ->
+                    val current = ++generation
+                    events += "start$current"
+                    streamScope.launch {
+                        try {
+                            awaitCancellation()
+                        } finally {
+                            withContext(NonCancellable) {
+                                cleanupStarted.complete(Unit)
+                                releaseCleanup.await()
+                                events += "taskClosed$current"
+                            }
+                        }
+                    }
+                },
+                openStream = {
+                    val current = opened.incrementAndGet()
+                    events += "open$current"
+                    if (current == 2) secondOpened.complete(Unit)
+                    flow<String> { awaitCancellation() }.produceIn(this)
+                },
+                onStreamStopped = { events += "stop$generation" }
+            ) { }
+        }
+        try {
+            withTimeout(TEST_TIMEOUT_MILLIS) { cleanupStarted.await() }
+            assertEquals("replacement raced uncompleted stream work", 1, opened.get())
+            releaseCleanup.complete(Unit)
+            withTimeout(TEST_TIMEOUT_MILLIS) { secondOpened.await() }
+            assertEquals(listOf("start1", "open1", "taskClosed1", "stop1", "start2", "open2"), events.take(6))
+        } finally {
+            releaseCleanup.complete(Unit)
+            consumer.cancelAndJoin()
+        }
+    }
+
+    @Test
+    fun anOuterDeadlineCancelsWithoutRestartingTheStream() = runBlocking {
+        var opens = 0
+        var stops = 0
+        val result = withTimeoutOrNull(SHORT_IDLE_EXPIRY_MILLIS) {
+            consumeWithIdleRestart<String>(
+                idleTimeoutMillis = NO_IDLE_EXPIRY_MILLIS,
+                streamName = "test stream",
+                openStream = {
+                    opens++
+                    flow<String> { awaitCancellation() }.produceIn(this)
+                },
+                onStreamStopped = { stops++ }
+            ) { }
+        }
+        assertNull(result)
+        assertEquals(1, opens)
+        assertEquals(1, stops)
+    }
 
     @Test
     fun everyMessageReachesTheHandlerWhileTheStreamIsAlive() = runBlocking {
@@ -152,13 +412,33 @@ class IdleRestartingStreamTest {
                     openStream = {
                         opens++
                         flow<String> { error("stream broke") }.produceIn(this)
-                    }
+                    },
+                    onStreamStopped = { error("cleanup broke") }
                 ) { }
             }
         }
 
         assertEquals("stream broke", failure.message)
+        assertEquals("cleanup broke", failure.suppressed.single().message)
         assertEquals("A broken stream must not be retried in place.", 1, opens)
+    }
+
+    private fun assertCancellationAndCleanupFailure(original: CancellationException, failure: Throwable) {
+        assertTrue("terminal failure must remain cancellation", failure is CancellationException)
+        // Coroutine stacktrace recovery can copy a CancellationException and retain its original
+        // as cause. Check identity inside a bounded chain, rather than across a suspension boundary.
+        val causes = mutableListOf<Throwable>()
+        var current: Throwable? = failure
+        repeat(16) {
+            val item = current ?: return@repeat
+            if (causes.any { it === item }) return@repeat
+            causes += item
+            current = item.cause
+        }
+        assertTrue("original cancellation must be retained", causes.any { it === original })
+        assertTrue("cleanup failure must remain available", causes.any { cause ->
+            cause.suppressed.any { it is DashboardSessionTimeoutException }
+        })
     }
 
     private companion object {

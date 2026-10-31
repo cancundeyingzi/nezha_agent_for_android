@@ -51,7 +51,7 @@ fun ConfigScreenContent(
     // 加载期间禁止编辑连接字段与“启动探针”：否则用户可能在字段被填充前就点启动，拿到一份空配置。
     val configLoading = vm.isConfigLoading
     // 连接字段的可用性：既要没有写入进行中，也要首次加载已完成。
-    val fieldsEnabled = !vm.isConfigWriteInProgress && !configLoading
+    val fieldsEnabled = !vm.isConfigWriteInProgress && !configLoading && !vm.isResettingConfigStorage
 
     // ── 通知权限 Launcher（异步时序安全） ──
     var pendingServiceLaunch by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -117,7 +117,7 @@ fun ConfigScreenContent(
             }
         }
 
-        if (!vm.isConfigStorageAvailable) {
+        if (!configLoading && !vm.isConfigStorageAvailable) {
             EtherCard(
                 modifier = Modifier.border(
                     width = 2.dp,
@@ -181,7 +181,7 @@ fun ConfigScreenContent(
                 confirmButton = {
                     GlassButtonPrimary(
                         onClick = { vm.onAutoStartPromptResult(true) },
-                        enabled = !vm.isConfigWriteInProgress
+                        enabled = fieldsEnabled
                     ) {
                         Text("启用")
                     }
@@ -189,7 +189,7 @@ fun ConfigScreenContent(
                 dismissButton = {
                     GlassButtonSecondary(
                         onClick = { vm.onAutoStartPromptResult(false) },
-                        enabled = !vm.isConfigWriteInProgress
+                        enabled = fieldsEnabled
                     ) {
                         Text("暂不启用")
                     }
@@ -212,7 +212,6 @@ fun ConfigScreenContent(
                 GlassButtonPrimary(
                     onClick = { vm.parseClipboardConfig() },
                     modifier = Modifier.weight(1f),
-                    // 粘贴会写入连接字段，故与字段同受加载态约束。
                     enabled = fieldsEnabled
                 ) {
                     Text("粘贴命令", fontWeight = FontWeight.Bold)
@@ -336,7 +335,7 @@ fun ConfigScreenContent(
                     onCheckedChange = { newValue ->
                         vm.onRootModeChanged(newValue, shizukuRequestCode)
                     },
-                    enabled = !vm.isConfigWriteInProgress
+                    enabled = fieldsEnabled
                 )
                 Column(modifier = Modifier.padding(start = 12.dp)) {
                     Text("Root / Shizuku 模式", style = MaterialTheme.typography.bodyMedium)
@@ -364,7 +363,7 @@ fun ConfigScreenContent(
                     vm.toggleRemoteCommand(newValue)
                 },
                 title = "允许面板远程执行命令",
-                description = "允许 TaskType 4 命令和新建交互终端 Shell；关闭后新请求立即生效",
+                description = "允许命令、交互终端和 MCP Exec；关闭后拒绝新请求并取消活动 MCP 命令",
                 enabled = vm.canEditConfig
             )
             if (vm.enableRemoteCommand) {
@@ -385,7 +384,7 @@ fun ConfigScreenContent(
                     vm.toggleRemoteFileManager(newValue)
                 },
                 title = "允许面板远程管理文件",
-                description = "允许 TaskType 11 浏览、下载和上传设备文件；关闭后新请求立即生效",
+                description = "允许文件管理和 MCP 目录列表、文件读取；关闭后拒绝新请求并取消活动 MCP 文件任务",
                 enabled = vm.canEditConfig
             )
             if (vm.enableRemoteFileManager) {

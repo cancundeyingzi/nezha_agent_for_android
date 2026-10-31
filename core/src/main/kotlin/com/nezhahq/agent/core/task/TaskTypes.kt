@@ -40,9 +40,6 @@ object TaskTypes {
         REPORT_CONFIG,
         APPLY_CONFIG,
         SERVER_TRANSFER_APPLY,
-        EXEC,
-        FS_LIST,
-        FS_READ,
         FS_WRITE,
         FS_DELETE,
         FS_TRANSFER

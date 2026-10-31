@@ -55,10 +55,10 @@ class AppContainer(context: Context) {
             try {
                 ConfigStore.synchronizeRootAuthorization(appContext, status)
             } catch (failure: Throwable) {
-                Logger.e("AppContainer: 应用已保存的高权限授权失败", failure)
+                Logger.e("AppContainer: 应用已保存的高权限授权失败 (Error=${failure.javaClass.simpleName})")
             }
         } catch (failure: Throwable) {
-            Logger.e("AppContainer: 配置存储初始化失败", failure)
+            Logger.e("AppContainer: 配置存储初始化失败 (Error=${failure.javaClass.simpleName})")
         } finally {
             // The one statement that must run on every path, logging failures included: a waiter
             // that is never resumed is a UI stuck on its loading state for the life of the process.

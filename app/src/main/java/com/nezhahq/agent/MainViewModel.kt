@@ -36,13 +36,16 @@ import com.nezhahq.agent.grpc.GrpcConnectionState
 import com.nezhahq.agent.service.AgentService
 import com.nezhahq.agent.simulator.GrpcSimulatedDeviceReporter
 import com.nezhahq.agent.simulator.SimulatedDeviceLoop
-import com.nezhahq.agent.ui.ClipboardConfigParser
+import com.nezhahq.agent.ui.ClipboardConfigImporter
 import com.nezhahq.agent.ui.ParsedUuid
 import com.nezhahq.agent.ui.UiEvent
 import com.nezhahq.agent.ui.UiEvents
 import com.nezhahq.agent.util.Logger
 import com.nezhahq.agent.util.RootShell
+import com.nezhahq.agent.util.awaitInitialConfiguration
+import com.nezhahq.agent.util.ConfigurationOperationGate
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -109,7 +112,7 @@ class MainViewModel(
         private set
 
     val isConfigStorageAvailable: Boolean
-        get() = storageStatus.isUsable
+        get() = !isConfigLoading && storageStatus.isUsable
 
     var isResettingConfigStorage by mutableStateOf(false)
         private set
@@ -162,6 +165,25 @@ class MainViewModel(
 
     var isConfigWriteInProgress by mutableStateOf(false)
         private set
+    private val configurationOperations = ConfigurationOperationGate { isConfigWriteInProgress = it }
+    private val clipboardConfigImporter by lazy {
+        ClipboardConfigImporter(
+            scope = viewModelScope,
+            operations = configurationOperations,
+            apply = { parsed ->
+                parsed.server?.let { server = it }
+                parsed.port?.let { port = it }
+                parsed.secret?.let { secret = it }
+                parsed.useTls?.let { useTls = it }
+                uuid = resolveUuid(parsed.uuid)
+                notify("配置已解析完成")
+            },
+            onFailure = { failure ->
+                Logger.e("MainViewModel: 剪贴板配置解析失败 (Error=${failure.javaClass.simpleName})")
+                notifyLong("剪贴板配置解析失败，请检查安装命令后重试")
+            }
+        )
+    }
 
     // ── 娱乐模拟设备上报 ──
     var simulatorServer by mutableStateOf(defaults.simulator.server)
@@ -234,7 +256,7 @@ class MainViewModel(
      * in underneath them.
      */
     val canEditConfig: Boolean
-        get() = !isConfigLoading && isConfigStorageAvailable && !isConfigWriteInProgress
+        get() = !isConfigLoading && isConfigStorageAvailable && !isConfigWriteInProgress && !isResettingConfigStorage
 
     // Last on purpose. viewModelScope runs on Dispatchers.Main.immediate, so this launch executes
     // inline up to its first real suspension; declared any earlier it could read state properties
@@ -259,7 +281,7 @@ class MainViewModel(
      * 2. 环境变量模式：`NZ_SERVER=host:port NZ_CLIENT_SECRET=xxx NZ_UUID=yyy NZ_TLS=true`
      */
     fun parseClipboardConfig() {
-        if (isConfigWriteInProgress || isConfigLoading) return
+        if (isConfigWriteInProgress || isConfigLoading || isResettingConfigStorage) return
         val context = getApplication<Application>()
         val clipboard = context.getSystemService(ClipboardManager::class.java)
         val input = clipboard
@@ -280,16 +302,7 @@ class MainViewModel(
             return
         }
 
-        viewModelScope.launch {
-            val parsed = withContext(Dispatchers.IO) { ClipboardConfigParser.parse(input) }
-            parsed.server?.let { server = it }
-            parsed.port?.let { port = it }
-            parsed.secret?.let { secret = it }
-            parsed.useTls?.let { useTls = it }
-            uuid = resolveUuid(parsed.uuid)
-
-            notify("配置已解析完成")
-        }
+        clipboardConfigImporter.submit(input)
     }
 
     /**
@@ -547,8 +560,15 @@ class MainViewModel(
     private fun checkAndShowAutoStartPrompt() {
         if (!isConfigStorageAvailable) return
         viewModelScope.launch {
-            val (hasShownAutoStartPrompt, status) = withContext(Dispatchers.IO) {
-                repository.loadAutoStartState().promptShown to repository.storageStatus()
+            val (hasShownAutoStartPrompt, status) = try {
+                withContext(Dispatchers.IO) {
+                    repository.loadAutoStartState().promptShown to repository.storageStatus()
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                Logger.e("MainViewModel: 读取自启设置失败 (Error=${failure.javaClass.simpleName})")
+                true to StorageStatus.UNAVAILABLE
             }
             storageStatus = status
             if (!isConfigStorageAvailable) {
@@ -596,10 +616,10 @@ class MainViewModel(
     /**
      * 切换远程 Shell 执行开关。
      *
-     * 此开关与 Root/Shizuku 模式完全独立，同时控制静默命令和交互终端；
+     * 此开关与 Root/Shizuku 模式完全独立，同时控制静默命令、交互终端和 MCP Exec；
      * Root 模式只决定已授权 Shell 能否提权。
      *
-     * 持久化成功后立即通知运行中的服务重读授权，兑现界面上「关闭后新请求立即生效」的承诺。
+     * 持久化成功后立即通知运行中的服务重读授权：拒绝新请求并取消对应的活动 MCP 后端。
      */
     fun toggleRemoteCommand(enabled: Boolean) {
         persistOnIo(
@@ -614,9 +634,10 @@ class MainViewModel(
     }
 
     /**
-     * 切换远程文件管理开关（TaskType 11）。
+     * 切换远程文件管理开关（TaskType 11 和 MCP FsList/FsRead）。
      *
      * 本应用持有「所有文件访问」权限，开启后面板可读写设备上几乎全部文件。
+     * 关闭后拒绝新请求并取消活动 MCP 文件后端。
      */
     fun toggleRemoteFileManager(enabled: Boolean) {
         persistOnIo(
@@ -643,12 +664,9 @@ class MainViewModel(
         )
     }
 
-    /** Clears all configuration on an IO thread and refreshes the UI with defaults. */
+    /** Clears all configuration on IO; every failure also releases the loading state. */
     fun resetConfigurationStorage() {
-        if (isResettingConfigStorage) return
-        // 加载期不重置：后台线程正握着存储锁做迁移，此刻还判断不出存储究竟坏没坏。这条分支
-        // 实际到不了 —— 触发重置的错误卡片依赖 storageStatus，加载期它不会是 UNAVAILABLE。
-        if (isConfigLoading) return
+        if (isResettingConfigStorage || isConfigLoading || isConfigWriteInProgress) return
         val ctx = getApplication<Application>()
         isResettingConfigStorage = true
         simulatorJob?.cancel()
@@ -656,26 +674,28 @@ class MainViewModel(
         simulatorRunning = false
         ctx.stopService(Intent(ctx, AgentService::class.java))
         viewModelScope.launch {
-            // 重置与随后的状态读取合并在同一段 IO 里，免得回到主线程后再去抢一次存储锁。
-            val (resetSucceeded, postResetStatus) = withContext(Dispatchers.IO) {
-                repository.resetStorage() to repository.storageStatus()
-            }
-            isResettingConfigStorage = false
-            storageStatus = postResetStatus
-            if (!resetSucceeded || !isConfigStorageAvailable) {
+            try {
+                val snapshot = withContext(Dispatchers.IO) {
+                    if (repository.resetStorage()) loadSnapshotOrDefaults()
+                    else ConfigurationSnapshot.DEFAULTS
+                }
+                storageStatus = snapshot.status
+                if (!snapshot.status.isUsable) {
+                    reportStorageProblem("配置存储重置失败，请稍后重试")
+                    return@launch
+                }
+                applyConfigurationSnapshot(snapshot, SnapshotApplyMode.RELOAD_AFTER_RESET)
+                storageErrorMessage = null
+                notifyLong("配置已重置，请重新填写连接信息")
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                storageStatus = StorageStatus.UNAVAILABLE
+                Logger.e("MainViewModel: 配置重置失败 (Error=${failure.javaClass.simpleName})")
                 reportStorageProblem("配置存储重置失败，请稍后重试")
-                return@launch
+            } finally {
+                isResettingConfigStorage = false
             }
-            val snapshot = withContext(Dispatchers.IO) { loadSnapshotOrDefaults() }
-            // 重置的语义就是「存储说了算」，所以这里整份覆盖，不做用户输入保护。
-            applyConfigurationSnapshot(snapshot, SnapshotApplyMode.RELOAD_AFTER_RESET)
-            storageStatus = snapshot.status
-            if (!isConfigStorageAvailable) {
-                reportStorageProblem("配置存储重置后读取失败，请稍后重试")
-                return@launch
-            }
-            storageErrorMessage = null
-            notifyLong("配置已重置，请重新填写连接信息")
         }
     }
 
@@ -686,7 +706,7 @@ class MainViewModel(
      * 开启时自动检测 Shizuku 可用性并按需请求权限。
      */
     fun onRootModeChanged(enabled: Boolean, shizukuRequestCode: Int) {
-        if (isConfigWriteInProgress) return
+        if (isConfigWriteInProgress || isConfigLoading || isResettingConfigStorage) return
         if (enabled) {
             rootMode = true
             tryRequestShizukuPermission(shizukuRequestCode)
@@ -845,20 +865,16 @@ class MainViewModel(
         }
     }
 
-    /**
-     * The one main-thread storage touch left, and the gate that keeps it cheap.
-     *
-     * Refusing while [isConfigLoading] is what stops this call from taking the coordinator lock
-     * during the legacy-store migration, which would block the main thread for its full duration.
-     * Once the load has landed the lock is only ever held for a single SharedPreferences commit, so
-     * asking synchronously here costs microseconds and keeps callers able to fail fast.
-     */
+    /** Uses the last observed status; persistence rechecks storage on IO before starting a service. */
     private fun requireConfigStorage(action: String): Boolean {
-        if (isConfigLoading) {
+        if (isConfigWriteInProgress) {
+            notify("配置正在处理，请稍候")
+            return false
+        }
+        if (isConfigLoading || isResettingConfigStorage) {
             notify("$action 已推迟：配置仍在加载，请稍候")
             return false
         }
-        storageStatus = repository.storageStatus()
         if (isConfigStorageAvailable) return true
         reportStorageProblem("$action 已拒绝：$CONFIG_STORAGE_UNAVAILABLE_MESSAGE")
         return false
@@ -873,7 +889,7 @@ class MainViewModel(
     ) {
         if (isConfigWriteInProgress) {
             onFailure()
-            notify("配置正在保存，请稍候")
+            notify("配置正在处理，请稍候")
             return
         }
         if (!requireConfigStorage(action)) {
@@ -881,14 +897,22 @@ class MainViewModel(
             return
         }
 
-        isConfigWriteInProgress = true
-        viewModelScope.launch {
-            val persisted = withContext(Dispatchers.IO) {
-                persistence().isSuccess
+        val operation = configurationOperations.tryBegin() ?: return
+        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            val (persisted, status) = try {
+                withContext(Dispatchers.IO) {
+                    persistence().isSuccess to repository.storageStatus()
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                Logger.e("MainViewModel: 配置保存失败 (Error=${failure.javaClass.simpleName})")
+                false to StorageStatus.UNAVAILABLE
+            } finally {
+                operation.close()
             }
-            isConfigWriteInProgress = false
-            if (persisted) {
-                storageStatus = repository.storageStatus()
+            storageStatus = status
+            if (persisted && status.isUsable) {
                 storageErrorMessage = null
                 onSuccess()
             } else {
@@ -938,7 +962,6 @@ class MainViewModel(
     }
 
     private fun reportStorageWriteFailure(message: String) {
-        storageStatus = repository.storageStatus()
         reportStorageProblem("$message；配置存储不可用，请重置配置存储")
     }
 
@@ -953,31 +976,26 @@ class MainViewModel(
         notifyLong(message)
     }
 
-    /**
-     * 首次加载：等后台初始化发出就绪信号，再把配置字段一次性填上。
-     *
-     * 全程不在主线程碰存储：等待只是挂起，读取跑在 IO 上，回到主线程时只剩赋值。
-     *
-     * 除了协程被取消（意味着 ViewModel 已销毁，没人再看这些状态），没有任何一条路径能绕过
-     * 末尾的 `isConfigLoading = false`：等待与读取都不会抛出异常，读取失败由
-     * [loadSnapshotOrDefaults] 降级成 [ConfigurationSnapshot.DEFAULTS]，其 status 为
-     * UNAVAILABLE，于是界面得到的是「存储不可用」这个可操作的结论，而不是一个永远转圈的
-     * 加载态。
-     */
+    /** Suspend for readiness, read on IO, and always end the loading state on completion or failure. */
     private fun loadConfigurationOnce() {
         viewModelScope.launch {
-            if (configurationReadiness.awaitWithin(CONFIG_READY_WARNING_TIMEOUT_MS) == null) {
-                // 超时不等于失败：某些设备上构建 Keystore 主密钥本来就很慢。只提示一次，然后
-                // 接着等 —— 提前放行会把主线程重新放回那把仍被握着的锁前面，比多等一会儿糟。
-                notifyLong(CONFIG_STORAGE_SLOW_MESSAGE)
-                configurationReadiness.await()
+            try {
+                val snapshot = awaitInitialConfiguration(
+                    readiness = configurationReadiness,
+                    readSnapshot = { repository.loadConfigurationSnapshot() },
+                    warningTimeoutMillis = CONFIG_READY_WARNING_TIMEOUT_MS,
+                    onSlowInitialization = { notifyLong(CONFIG_STORAGE_SLOW_MESSAGE) }
+                )
+                applyConfigurationSnapshot(snapshot, SnapshotApplyMode.INITIAL_LOAD)
+                storageStatus = snapshot.status
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                Logger.e("MainViewModel: 配置加载失败 (Error=${failure.javaClass.simpleName})")
+                storageStatus = StorageStatus.UNAVAILABLE
+            } finally {
+                isConfigLoading = false
             }
-
-            val snapshot = withContext(Dispatchers.IO) { loadSnapshotOrDefaults() }
-
-            applyConfigurationSnapshot(snapshot, SnapshotApplyMode.INITIAL_LOAD)
-            storageStatus = snapshot.status
-            isConfigLoading = false
             if (isConfigStorageAvailable) {
                 storageErrorMessage = null
             } else {
@@ -989,8 +1007,10 @@ class MainViewModel(
     /** 读取失败一律降级成默认快照：它的 status 就是 UNAVAILABLE，正是界面该显示的结论。 */
     private fun loadSnapshotOrDefaults(): ConfigurationSnapshot = try {
         repository.loadConfigurationSnapshot()
+    } catch (cancelled: CancellationException) {
+        throw cancelled
     } catch (failure: Throwable) {
-        Logger.e("MainViewModel: 读取配置快照失败", failure)
+        Logger.e("MainViewModel: 读取配置快照失败 (Error=${failure.javaClass.simpleName})")
         ConfigurationSnapshot.DEFAULTS
     }
 

@@ -81,7 +81,7 @@ class KeepAliveAccessibilityService : AccessibilityService() {
                             val result = try {
                                 writeScreenshotResult(screenshot, targetFile)
                             } catch (e: Exception) {
-                                Logger.e("KeepAliveAccessibilityService: 保存截图失败", e)
+                                Logger.e("KeepAliveAccessibilityService: 保存截图失败 (Error=${e.javaClass.simpleName})")
                                 ScreenshotSaveResult.Failure(e.message ?: "保存截图失败")
                             } finally {
                                 executor.shutdown()
@@ -102,7 +102,7 @@ class KeepAliveAccessibilityService : AccessibilityService() {
                 )
             } catch (e: Exception) {
                 executor.shutdown()
-                Logger.e("KeepAliveAccessibilityService: 调用无障碍截图失败", e)
+                Logger.e("KeepAliveAccessibilityService: 调用无障碍截图失败 (Error=${e.javaClass.simpleName})")
                 if (continuation.isActive) {
                     continuation.resume(
                         ScreenshotSaveResult.Failure(e.message ?: "调用无障碍截图失败")
