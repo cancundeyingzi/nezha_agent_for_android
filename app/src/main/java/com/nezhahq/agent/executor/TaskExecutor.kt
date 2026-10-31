@@ -26,13 +26,9 @@ import java.io.IOException
 import java.io.InputStream
 import java.net.InetSocketAddress
 import java.net.Socket
-import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
-import javax.net.ssl.SSLContext
-import javax.net.ssl.TrustManager
-import javax.net.ssl.X509TrustManager
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -263,7 +259,7 @@ private fun hasReachedDeadline(nowNanos: Long, deadlineNanos: Long): Boolean =
  * - **TaskType 4 (Command)**：远程命令执行（带 2 小时超时保护）
  *
  * ## 安全说明
- * - HTTPGet 使用信任所有证书的 OkHttpClient，用于监控自签名 HTTPS 站点
+ * - HTTPGet 严格校验证书链和主机名，校验失败直接报告失败
  * - Command 与交互终端共用远程 Shell 授权，默认禁用
  * - Command 执行设有 2 小时硬超时，防止死循环脚本阻塞协程
  */
@@ -292,37 +288,8 @@ object TaskExecutor {
         ProcessExecutionOrchestrator(processCompatibility)
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // OkHttpClient：信任所有证书（监控场景需要能连接自签名 HTTPS 站点）
-    // ──────────────────────────────────────────────────────────────────────────
-
-    /** 信任所有证书的 TrustManager，用于监控自签名 HTTPS 站点 */
-    private val trustAllManager = object : X509TrustManager {
-        override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-        override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-        override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
-    }
-
-    /**
-     * 仅供 HTTPGet 健康检查使用的 OkHttpClient。
-     *
-     * - 信任所有 SSL 证书（对齐官方探针行为，监控场景需要）
-     * - 禁用主机名验证（允许 IP 直连和自签名证书）
-     * - 10 秒连接/读取超时
-     *
-     * **禁止复用**：它不校验服务端身份，任何携带凭据的请求用它发送都等同于明文暴露。
-     * 需要安全传输的场景请另建默认配置的 OkHttpClient。
-     */
-    private val insecureMonitoringClient: OkHttpClient = run {
-        val sslContext = SSLContext.getInstance("TLS")
-        sslContext.init(null, arrayOf<TrustManager>(trustAllManager), SecureRandom())
-        OkHttpClient.Builder()
-            .sslSocketFactory(sslContext.socketFactory, trustAllManager)
-            .hostnameVerifier { _, _ -> true }
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(10, TimeUnit.SECONDS)
-            .build()
-    }
+    // Defaults retain platform certificate trust and hostname verification. There is no insecure retry.
+    private val monitoringClient by lazy { createMonitoringClient() }
 
     // ──────────────────────────────────────────────────────────────────────────
     // 任务执行入口
@@ -354,13 +321,12 @@ object TaskExecutor {
             when (task.type) {
                 // ── TaskType 1：HTTPGet 健康检查 + SSL 证书解析 ──────────────
                 TaskTypes.HTTP_GET -> {
-                    val params = parseParams(task.data)
-                    val url = params.host
+                    val url = parseHost(task.data)
                     val start = System.currentTimeMillis()
                     val request = Request.Builder().url(url).build()
                     // 使用 .use {} 确保 Response 在异常时也能正确释放，
                     // 防止 OkHttp 连接池泄漏（原 response.close() 在异常路径下不会执行）
-                    insecureMonitoringClient.newCall(request).execute().use { response ->
+                    monitoringClient.newCall(request).execute().use { response ->
                         val delay = (System.currentTimeMillis() - start).toFloat()
 
                         // 提取 SSL 证书信息（仅 HTTPS 连接有 handshake）
@@ -382,9 +348,9 @@ object TaskExecutor {
 
                 // ── TaskType 2：ICMP Ping ────────────────────────────────────
                 TaskTypes.ICMP_PING -> {
-                    val params = parseParams(task.data)
+                    val host = parseHost(task.data)
                     val start = System.currentTimeMillis()
-                    val process = ProcessBuilder("ping", "-c", "1", "-w", "5", params.host).start()
+                    val process = ProcessBuilder("ping", "-c", "1", "-w", "5", host).start()
                     var exitedNormally = false
                     try {
                         // exitValue 轮询兼容 API 23；不调用 API 26 才提供的带超时 waitFor。
@@ -405,15 +371,21 @@ object TaskExecutor {
 
                 // ── TaskType 3：TCP Ping ─────────────────────────────────────
                 TaskTypes.TCP_PING -> {
-                    val params = parseParams(task.data)
+                    val params = when (val parsed = parseTcpTarget(task.data)) {
+                        is HostPort.Result.Parsed -> parsed
+                        is HostPort.Result.Invalid -> throw IllegalArgumentException(parsed.reason)
+                    }
                     val start = System.currentTimeMillis()
                     val socket = Socket()
                     try {
                         socket.connect(InetSocketAddress(params.host, params.port), 5000)
                         val delay = (System.currentTimeMillis() - start).toFloat()
                         resultBuilder.setDelay(delay).setSuccessful(true)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
                     } catch (e: Exception) {
-                        resultBuilder.setDelay(0f).setSuccessful(false)
+                        logTaskFailure(task.id, e)
+                        resultBuilder.setDelay(0f).setSuccessful(false).setData(e.message ?: "TCP probe failed")
                     } finally {
                         socket.close()
                     }
@@ -445,6 +417,7 @@ object TaskExecutor {
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (e: Exception) {
+            logTaskFailure(task.id, e)
             resultBuilder.setSuccessful(false).setData(e.message ?: "Unknown error")
         }
 
@@ -523,6 +496,7 @@ object TaskExecutor {
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (e: Exception) {
+            logTaskFailure(resultBuilder.id, e)
             val delay = (System.currentTimeMillis() - startTime).toFloat()
             resultBuilder.setData(e.message ?: "Unknown error").setDelay(delay).setSuccessful(false)
         }
@@ -555,28 +529,68 @@ object TaskExecutor {
     // 参数解析
     // ──────────────────────────────────────────────────────────────────────────
 
-    /** 任务参数数据类，包含目标主机和端口 */
-    private data class TaskParams(val host: String, val port: Int = 0)
+    /**
+     * TCP Ping 省略端口时使用的端口。
+     *
+     * 取 80 是为了与下面 JSON 分支历史上的 `optInt("port", 80)` 保持一致：同一个目标
+     * 写成 `{"host":"x"}` 还是写成 `x`，不应该连到不同端口。80 也是这类探测最常见的目标。
+     */
+    private const val DEFAULT_TCP_PING_PORT = 80
 
     /**
-     * 解析面板下发的任务数据。
+     * 解析 HTTPGet / ICMPPing 的目标主机。
+     *
+     * 支持两种格式：
+     * 1. JSON 格式：`{"host": "example.com"}`
+     * 2. 纯字符串格式：`"example.com"`（兼容旧版面板）
+     *
+     * 这里刻意**不**拆 `host:port`：HTTPGet 拿到的是完整 URL，`https://example.com` 里的
+     * 冒号不是端口分隔符，拆了会把 host 变成 `https`。需要端口的 TCP Ping 走 [parseTcpTarget]。
+     */
+    private fun parseHost(data: String): String = try {
+        JSONObject(data).optString("host", data)
+    } catch (_: Exception) {
+        data
+    }
+
+    /**
+     * 解析 TCP Ping 的目标。
      *
      * 支持两种格式：
      * 1. JSON 格式：`{"host": "example.com", "port": 80}`
-     * 2. 纯字符串格式：`"example.com"`（兼容旧版面板）
+     * 2. 纯字符串格式：`example.com:80` / `[::1]:8080` / `example.com`（兼容旧版面板）
      *
-     * @param data 面板下发的原始数据字符串
-     * @return 解析后的 TaskParams
+     * 纯字符串分支此前是 `TaskParams(host = data)`：host 变成整串 `example.com:80`、port 留 0，
+     * 连接必然失败——文档声称支持的格式其实一次都没通过。现在与 NAT 共用 [HostPort] 的规则。
      */
-    private fun parseParams(data: String): TaskParams {
-        return try {
-            val json = JSONObject(data)
-            TaskParams(
-                host = json.optString("host", data),
-                port = json.optInt("port", 80)
-            )
-        } catch (e: Exception) {
-            TaskParams(host = data)
+    private fun parseTcpTarget(data: String): HostPort.Result {
+        val input = data.trim()
+        if (!input.startsWith("{")) {
+            return HostPort.parse(input, defaultPort = DEFAULT_TCP_PING_PORT)
         }
+        val json = try {
+            JSONObject(input)
+        } catch (_: Exception) {
+            return HostPort.Result.Invalid("无效的 TCP 目标 JSON")
+        }
+        val host = json.optString("host", "").trim()
+        val port = if (json.has("port")) {
+            json.optString("port").toIntOrNull()
+                ?: return HostPort.Result.Invalid("无效的端口号")
+        } else {
+            DEFAULT_TCP_PING_PORT
+        }
+        return HostPort.of(host, port)
     }
+}
+
+/** Uses the platform trust store and OkHttp's default hostname verifier. */
+internal fun createMonitoringClient(): OkHttpClient = OkHttpClient.Builder()
+    .connectTimeout(10, TimeUnit.SECONDS)
+    .readTimeout(10, TimeUnit.SECONDS)
+    .build()
+
+/** Do not pass the exception to Logger: its message and causes can include commands or secrets. */
+internal fun logTaskFailure(taskId: Long, failure: Throwable) {
+    Logger.e("TaskExecutor: 任务失败 (TaskID=$taskId, Error=${failure.javaClass.simpleName})")
 }

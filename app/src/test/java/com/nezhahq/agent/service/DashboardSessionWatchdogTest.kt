@@ -7,15 +7,20 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class DashboardSessionWatchdogTest {
     @Test
-    fun officialTimeoutDefaultsArePreserved() {
+    fun nullableResultsAreReturnedWithoutInventingATimeout() = runBlocking {
+        assertNull(DashboardSessionWatchdog.callWithin<String?>(1_000, "nullable") { null })
+    }
+
+    @Test
+    fun taskIdleReplacementHasALongerBudgetThanTheHeartbeat() {
         assertEquals(5_000L, DashboardSessionWatchdog.HANDSHAKE_TIMEOUT_MS)
         assertEquals(10_000L, DashboardSessionWatchdog.STATE_RECEIPT_TIMEOUT_MS)
-        assertEquals(30_000L, DashboardSessionWatchdog.TASK_IDLE_TIMEOUT_MS)
-        assertEquals(5_000L, DashboardSessionWatchdog.RECONNECT_BACKOFF_MS)
+        assertEquals(300_000L, DashboardSessionWatchdog.TASK_IDLE_TIMEOUT_MS)
         assertEquals(2_000L, DashboardSessionWatchdog.STATE_REPORT_INTERVAL_MS)
     }
 

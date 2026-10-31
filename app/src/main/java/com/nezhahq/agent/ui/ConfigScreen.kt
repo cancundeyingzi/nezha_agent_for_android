@@ -47,6 +47,7 @@ fun ConfigScreenContent(
 
     // ── gRPC 连接状态收集 ──
     val grpcState by vm.grpcConnectionState.collectAsState()
+    val fieldsEnabled = !vm.isConfigLoading && !vm.isConfigWriteInProgress && !vm.isResettingConfigStorage
 
     // ── 通知权限 Launcher（异步时序安全） ──
     var pendingServiceLaunch by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -87,7 +88,15 @@ fun ConfigScreenContent(
             )
         }
 
-        if (!vm.isConfigStorageAvailable) {
+        if (vm.isConfigLoading) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                Spacer(modifier = Modifier.width(10.dp))
+                Text("正在加载已保存的配置，请稍候…", style = MaterialTheme.typography.bodySmall)
+            }
+        }
+
+        if (!vm.isConfigLoading && !vm.isConfigStorageAvailable) {
             EtherCard(
                 modifier = Modifier.border(
                     width = 2.dp,
@@ -151,7 +160,7 @@ fun ConfigScreenContent(
                 confirmButton = {
                     GlassButtonPrimary(
                         onClick = { vm.onAutoStartPromptResult(true) },
-                        enabled = !vm.isConfigWriteInProgress
+                        enabled = fieldsEnabled
                     ) {
                         Text("启用")
                     }
@@ -159,7 +168,7 @@ fun ConfigScreenContent(
                 dismissButton = {
                     GlassButtonSecondary(
                         onClick = { vm.onAutoStartPromptResult(false) },
-                        enabled = !vm.isConfigWriteInProgress
+                        enabled = fieldsEnabled
                     ) {
                         Text("暂不启用")
                     }
@@ -182,7 +191,7 @@ fun ConfigScreenContent(
                 GlassButtonPrimary(
                     onClick = { vm.parseClipboardConfig() },
                     modifier = Modifier.weight(1f),
-                    enabled = !vm.isConfigWriteInProgress
+                    enabled = fieldsEnabled
                 ) {
                     Text("粘贴命令", fontWeight = FontWeight.Bold)
                 }
@@ -255,25 +264,25 @@ fun ConfigScreenContent(
             EtherTextField(
                 value = vm.server, onValueChange = { vm.server = it },
                 label = "服务端 IP 或域名", modifier = Modifier.fillMaxWidth(),
-                enabled = !vm.isConfigWriteInProgress
+                enabled = fieldsEnabled
             )
             Spacer(modifier = Modifier.height(12.dp))
             EtherTextField(
                 value = vm.port, onValueChange = { vm.port = it },
                 label = "gRPC 端口 (例如 8008)", modifier = Modifier.fillMaxWidth(),
-                enabled = !vm.isConfigWriteInProgress
+                enabled = fieldsEnabled
             )
             Spacer(modifier = Modifier.height(12.dp))
             EtherTextField(
                 value = vm.secret, onValueChange = { vm.secret = it },
                 label = "客户端密钥 (Secret)", modifier = Modifier.fillMaxWidth(),
-                enabled = !vm.isConfigWriteInProgress
+                enabled = fieldsEnabled
             )
             Spacer(modifier = Modifier.height(12.dp))
             EtherTextField(
                 value = vm.uuid, onValueChange = { vm.uuid = it },
                 label = "客户端标识 (UUID)", modifier = Modifier.fillMaxWidth(),
-                enabled = !vm.isConfigWriteInProgress
+                enabled = fieldsEnabled
             )
             Spacer(modifier = Modifier.height(12.dp))
             EtherToggleRow(
@@ -282,7 +291,7 @@ fun ConfigScreenContent(
                 title = "使用 TLS 加密连接",
                 description = "关闭后将使用明文传输，仅适用于可信内网部署（需重启服务生效）",
                 highlightWhenChecked = false,
-                enabled = !vm.isConfigWriteInProgress
+                enabled = fieldsEnabled
             )
             if (!vm.useTls) {
                 Text(
@@ -304,7 +313,7 @@ fun ConfigScreenContent(
                     onCheckedChange = { newValue ->
                         vm.onRootModeChanged(newValue, shizukuRequestCode)
                     },
-                    enabled = !vm.isConfigWriteInProgress
+                    enabled = fieldsEnabled
                 )
                 Column(modifier = Modifier.padding(start = 12.dp)) {
                     Text("Root / Shizuku 模式", style = MaterialTheme.typography.bodyMedium)

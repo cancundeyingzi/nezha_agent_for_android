@@ -1,7 +1,55 @@
 package com.nezhahq.agent.util
 
 import com.nezhahq.agent.core.config.StorageStatus
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
+
+/**
+ * One-shot signal that the first [ConfigurationStorageCoordinator.initialize] has finished.
+ *
+ * The coordinator guards initialization and every read with the same lock, and initialization is
+ * what migrates the legacy encrypted store and builds an Android Keystore master key — seconds of
+ * work on some devices. A main-thread read issued while that runs therefore blocks for the whole
+ * migration, which is exactly the cold-start ANR the background initialization was meant to avoid.
+ * Waiting for this signal is how a caller stays off that lock instead of hoping to arrive late.
+ *
+ * A [CompletableDeferred] rather than a `StateFlow`, because the transition happens exactly once and
+ * never reverses: awaiting is a single suspending call with no "skip the initial value" filtering, a
+ * waiter that arrives after completion resumes without suspending at all, and there is no way to
+ * represent "not ready again". It also owns no scope, so the producer stays the plain daemon thread
+ * that already exists rather than forcing a process-lifetime [kotlinx.coroutines.CoroutineScope]
+ * into the Application just to host one job.
+ */
+internal class ConfigurationReadiness {
+    private val ready = CompletableDeferred<StorageStatus>()
+
+    /** True once [complete] has run, i.e. once the storage lock is no longer held for migration. */
+    val isReady: Boolean
+        get() = ready.isCompleted
+
+    /**
+     * Publishes the outcome of the first initialization; the first call wins, later ones are noise.
+     *
+     * Every path out of initialization has to reach this, failures included. A waiter that is never
+     * resumed is a UI frozen on its loading state for the life of the process.
+     */
+    fun complete(status: StorageStatus) {
+        ready.complete(status)
+    }
+
+    suspend fun await(): StorageStatus = ready.await()
+
+    /**
+     * [await] bounded by [timeoutMillis], returning null when the deadline came first.
+     *
+     * Only the waiting is abandoned, never the signal: the timeout cancels this call's continuation,
+     * so the deferred stays active and a later [await] still resolves. Callers use it to say
+     * something about an unusually slow migration without giving up on the result.
+     */
+    suspend fun awaitWithin(timeoutMillis: Long): StorageStatus? =
+        withTimeoutOrNull(timeoutMillis) { ready.await() }
+}
 
 internal enum class LegacyImportResult {
     COMPLETED,

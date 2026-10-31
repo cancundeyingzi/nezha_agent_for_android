@@ -33,6 +33,11 @@ import androidx.compose.ui.unit.sp
 import com.nezhahq.agent.core.model.SimulatedDeviceConfig
 import rikka.shizuku.Shizuku
 import com.nezhahq.agent.MainViewModel
+import com.nezhahq.agent.util.PermissionChecker
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 // 工具页与配置页，以及它们共用的权限行和系统跳转工具。
 
@@ -44,10 +49,29 @@ fun ToolsScreenContent(
     val context = LocalContext.current
     val scrollState = rememberScrollState()
 
-    // ── 权限状态列表（响应式，自动驱动 UI 重组）──
-    var permissionList by remember {
-        mutableStateOf(com.nezhahq.agent.util.PermissionChecker.getAllPermissionStatus(context))
+    val scope = rememberCoroutineScope()
+    var permissionList by remember { mutableStateOf<List<PermissionChecker.PermissionItem>>(emptyList()) }
+    var permissionsLoading by remember { mutableStateOf(true) }
+    var permissionError by remember { mutableStateOf<String?>(null) }
+    // Includes a configuration read: never call from composition or an activity callback directly.
+    val refreshPermissions: () -> Unit = {
+        scope.launch {
+            permissionsLoading = true
+            try {
+                permissionList = withContext(Dispatchers.IO) {
+                    PermissionChecker.getAllPermissionStatus(context)
+                }
+                permissionError = null
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                permissionError = "权限状态读取失败，请重新进入此页面重试"
+            } finally {
+                permissionsLoading = false
+            }
+        }
     }
+    LaunchedEffect(Unit) { refreshPermissions() }
 
     // ── 生命周期感知：从系统设置页返回时自动刷新权限状态 ──
     @Suppress("DEPRECATION")
@@ -55,7 +79,7 @@ fun ToolsScreenContent(
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                permissionList = com.nezhahq.agent.util.PermissionChecker.getAllPermissionStatus(context)
+                refreshPermissions()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -67,7 +91,7 @@ fun ToolsScreenContent(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
         // 刷新全部权限状态
-        permissionList = com.nezhahq.agent.util.PermissionChecker.getAllPermissionStatus(context)
+        refreshPermissions()
         if (granted) {
             Toast.makeText(context, "短信权限已授予，可在终端中使用 @agent sms", Toast.LENGTH_SHORT).show()
         } else {
@@ -107,7 +131,7 @@ fun ToolsScreenContent(
                 onValueChange = { vm.simulatorServer = it },
                 label = "模拟器服务端 IP 或域名",
                 modifier = Modifier.fillMaxWidth(),
-                enabled = !vm.isConfigWriteInProgress
+                enabled = !vm.isConfigWriteInProgress && !vm.isConfigLoading && !vm.isResettingConfigStorage
             )
             Spacer(modifier = Modifier.height(12.dp))
             EtherTextField(
@@ -116,7 +140,7 @@ fun ToolsScreenContent(
                 label = "模拟器 gRPC 端口",
                 modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                enabled = !vm.isConfigWriteInProgress
+                enabled = !vm.isConfigWriteInProgress && !vm.isConfigLoading && !vm.isResettingConfigStorage
             )
             Spacer(modifier = Modifier.height(12.dp))
             EtherTextField(
@@ -124,7 +148,7 @@ fun ToolsScreenContent(
                 onValueChange = { vm.simulatorSecret = it },
                 label = "模拟器客户端密钥 (Secret)",
                 modifier = Modifier.fillMaxWidth(),
-                enabled = !vm.isConfigWriteInProgress
+                enabled = !vm.isConfigWriteInProgress && !vm.isConfigLoading && !vm.isResettingConfigStorage
             )
             Spacer(modifier = Modifier.height(12.dp))
             EtherTextField(
@@ -133,7 +157,7 @@ fun ToolsScreenContent(
                 label = "模拟器并发线程数 (1-${SimulatedDeviceConfig.MAX_THREAD_COUNT})",
                 modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                enabled = !vm.isConfigWriteInProgress
+                enabled = !vm.isConfigWriteInProgress && !vm.isConfigLoading && !vm.isResettingConfigStorage
             )
             Spacer(modifier = Modifier.height(8.dp))
             EtherToggleRow(
@@ -142,7 +166,7 @@ fun ToolsScreenContent(
                 title = "使用 TLS 加密连接",
                 description = "仅影响娱乐模拟设备，不会修改真实探针连接配置",
                 highlightWhenChecked = false,
-                enabled = !vm.isConfigWriteInProgress
+                enabled = !vm.isConfigWriteInProgress && !vm.isConfigLoading && !vm.isResettingConfigStorage
             )
             Spacer(modifier = Modifier.height(8.dp))
             Column(
@@ -214,6 +238,10 @@ fun ToolsScreenContent(
                 modifier = Modifier.padding(bottom = 8.dp)
             )
 
+            if (permissionsLoading) {
+                Text("正在检测权限状态…", style = MaterialTheme.typography.bodySmall)
+            }
+            permissionError?.let { Text(it, color = LgError, style = MaterialTheme.typography.bodySmall) }
             permissionList.forEach { item ->
                 Spacer(modifier = Modifier.height(4.dp))
                 PermissionStatusRow(
@@ -255,9 +283,7 @@ fun ToolsScreenContent(
                             }
                             "auto_start" -> {
                                 vm.toggleAutoStart(!item.granted) {
-                                    permissionList =
-                                        com.nezhahq.agent.util.PermissionChecker
-                                            .getAllPermissionStatus(context)
+                                    refreshPermissions()
                                 }
                             }
                             "storage" -> {

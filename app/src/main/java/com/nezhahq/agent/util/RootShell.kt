@@ -37,13 +37,7 @@ object RootShell {
         sessionFactory = ::startSession,
         markerFactory = { ShellMarker(newMarkerToken()) },
         retryCooldownMs = RETRY_COOLDOWN_MS,
-        onCommandFailure = { command, exception ->
-            if (command == "<start>") {
-                Logger.e("RootShell: 建立 Shell 会话失败", exception)
-            } else {
-                Logger.e("RootShell: 执行命令失败 [$command]，正在重置会话（${exception.javaClass.name}）", exception)
-            }
-        }
+        onCommandFailure = { _, exception -> logShellCommandFailure(exception) }
     )
 
     private val accessController = PrivilegedAccessController(
@@ -125,7 +119,7 @@ object RootShell {
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (exception: Exception) {
-                Logger.e("RootShell: 隔离命令执行失败", exception)
+                Logger.e("RootShell: 隔离命令执行失败 (Error=${exception.javaClass.simpleName})")
                 ""
             } finally {
                 destroyer.cancel()
@@ -162,7 +156,7 @@ object RootShell {
             ManagedProcessInputStream(managed)
         } catch (exception: Exception) {
             managed.close()
-            Logger.e("RootShell: 启动流式高权限命令失败", exception)
+            Logger.e("RootShell: 启动流式高权限命令失败 (Error=${exception.javaClass.simpleName})")
             null
         }
     }
@@ -225,7 +219,7 @@ object RootShell {
             }
         } catch (exception: Exception) {
             ShellSession.destroyProcess(launched.process)
-            Logger.e("RootShell: 初始化独立高权限 Shell 失败", exception)
+            Logger.e("RootShell: 初始化独立高权限 Shell 失败 (Error=${exception.javaClass.simpleName})")
             null
         }
     }
@@ -271,7 +265,7 @@ object RootShell {
             Logger.i("RootShell: su 启动被中断，取消本次高权限 Shell 建立。")
             return null
         } catch (exception: Exception) {
-            Logger.i("RootShell: su 命令执行失败（${exception.message}）。")
+            Logger.i("RootShell: su 命令执行失败（${exception.javaClass.simpleName}）。")
         } finally {
             temporarySuProcess?.let(ShellSession::destroyProcess)
         }
@@ -302,7 +296,7 @@ object RootShell {
             temporaryProcess = null
             return launched
         } catch (exception: Exception) {
-            Logger.e("RootShell: 已授权的 Shizuku Shell 启动失败", exception)
+            Logger.e("RootShell: 已授权的 Shizuku Shell 启动失败 (Error=${exception.javaClass.simpleName})")
             return null
         } finally {
             temporaryProcess?.let(ShellSession::destroyProcess)
@@ -346,7 +340,7 @@ object RootShell {
                 !Shizuku.isPreV11() &&
                 Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
         } catch (exception: Exception) {
-            Logger.e("RootShell: 检测 Shizuku 状态时异常", exception)
+            Logger.e("RootShell: 检测 Shizuku 状态时异常 (Error=${exception.javaClass.simpleName})")
             false
         }
     }
@@ -437,4 +431,9 @@ internal class ShellBackendPolicy {
         selected = null
         suRejected = false
     }
+}
+
+/** Command text and exception messages can both contain credentials; retain only the failure type. */
+internal fun logShellCommandFailure(failure: Throwable) {
+    Logger.e("RootShell: 命令或会话失败，正在重置会话 (Error=${failure.javaClass.simpleName})")
 }

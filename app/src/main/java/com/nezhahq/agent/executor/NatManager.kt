@@ -53,11 +53,11 @@ class NatManager(
                     .setData(ByteString.copyFrom(header))
                     .build()
                 outputChannel.send(headerMsg)
-                Logger.i("NatManager: 已发送 StreamID 握手帧 (StreamID=$streamId)")
+                Logger.i("NatManager: 已发送 StreamID 握手帧")
 
                 // 2. 建立到目标 Host 的本地 TCP Socket 连接
                 connectToTarget()
-                Logger.i("NatManager: 已成功连接到本地目标 $host (StreamID=$streamId)")
+                Logger.i("NatManager: 已成功连接到本地目标")
 
                 // 3. 启动 Socket 读取协程
                 launch(Dispatchers.IO) {
@@ -96,7 +96,7 @@ class NatManager(
         } catch (e: CancellationException) {
             if (!currentCoroutineContext().isActive) throw e
         } catch (e: Exception) {
-            Logger.i("NatManager: NAT 会话出现异常或自行结束 (StreamID=$streamId): ${e.message}")
+            Logger.i("NatManager: NAT 会话出现异常或自行结束 (Error=${e.javaClass.simpleName})")
         }
     }
 
@@ -150,7 +150,7 @@ class NatManager(
 
     fun close() {
         if (closed.getAndSet(true)) return
-        Logger.i("NatManager: 正在关闭 NAT 会话 (StreamID=$streamId)")
+        Logger.i("NatManager: 正在关闭 NAT 会话")
         inputChannel.close()
         try { socket?.close() } catch (_: Exception) {}
         try { socketOutput?.close() } catch (_: Exception) {}
@@ -175,7 +175,7 @@ class NatManager(
             throw e
         } catch (e: Exception) {
             if (!closed.get()) {
-                Logger.e("NatManager: 读取本地 Socket 数据异常 (StreamID=$streamId)", e)
+                Logger.e("NatManager: 读取本地 Socket 数据异常 (Error=${e.javaClass.simpleName})")
             }
         }
     }
@@ -216,24 +216,13 @@ class NatManager(
             throw e
         } catch (e: Exception) {
             if (!closed.get()) {
-                Logger.e("NatManager: 写入本地 Socket 失败 (StreamID=$streamId)", e)
+                Logger.e("NatManager: 写入本地 Socket 失败 (Error=${e.javaClass.simpleName})")
             }
         }
     }
 
-    private fun parseHostPort(hostPort: String): Pair<String, Int> {
-        val lastColon = hostPort.lastIndexOf(':')
-        require(lastColon > 0 && lastColon < hostPort.length - 1) {
-            "无效的 Host 格式: $hostPort（期望格式: host:port）"
+    private fun parseHostPort(hostPort: String): Pair<String, Int> =
+        requireValidNatTarget(hostPort).let { result ->
+            result.host to result.port
         }
-        var h = hostPort.substring(0, lastColon)
-        // 兼容 IPv6 的标准方括号格式，如: [::1]:8080
-        if (h.startsWith("[") && h.endsWith("]")) {
-            h = h.substring(1, h.length - 1)
-        }
-        val p = hostPort.substring(lastColon + 1).toIntOrNull()
-            ?: throw IllegalArgumentException("无效的端口号: ${hostPort.substring(lastColon + 1)}")
-        require(p in 1..65535) { "端口号超出范围: $p" }
-        return Pair(h, p)
-    }
 }

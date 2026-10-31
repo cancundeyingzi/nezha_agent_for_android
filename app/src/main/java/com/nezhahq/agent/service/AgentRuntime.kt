@@ -19,6 +19,7 @@ import com.nezhahq.agent.executor.FileManager
 import com.nezhahq.agent.executor.NatManager
 import com.nezhahq.agent.executor.TaskExecutor
 import com.nezhahq.agent.executor.TerminalManager
+import com.nezhahq.agent.executor.requireValidNatTarget
 import com.nezhahq.agent.grpc.GrpcConnection
 import com.nezhahq.agent.grpc.GrpcConnectionState
 import com.nezhahq.agent.grpc.GrpcManager
@@ -128,6 +129,7 @@ internal class AgentRuntime(
     private val gpuCollector = GpuCollector()
     private val stateCollector = SystemStateCollector(appContext, gpuCollector, ioDispatcher)
     private val capabilities = AtomicReference(config.remoteCapabilities)
+    private val reconnectBackoff = ReconnectBackoffPolicy()
 
     private var state = LifecycleState.NEW
     private var connectionJob: Job? = null
@@ -271,7 +273,7 @@ internal class AgentRuntime(
                     throw cancellation
                 } catch (secondary: Throwable) {
                     Logger.e("AgentRuntime: 连接失败处理自身异常，仍将继续重连", secondary)
-                    delay(DashboardSessionWatchdog.RECONNECT_BACKOFF_MS)
+                    delay(reconnectBackoff.nextDelayMillis())
                 }
             }
         }
@@ -327,37 +329,41 @@ internal class AgentRuntime(
                     DashboardSessionWatchdog.STATE_RECEIPT_TIMEOUT_MS,
                     "ReportSystemState receipt"
                 )
-                if (connectionMarked.compareAndSet(false, true)) showConnectedStatus()
+                if (connectionMarked.compareAndSet(false, true)) {
+                    reconnectBackoff.reset()
+                    showConnectedStatus()
+                }
             }
         } finally {
             receipts.cancel()
         }
     }
 
-    private suspend fun handleTaskStream(stub: NezhaServiceCoroutineStub) = coroutineScope {
+    private suspend fun handleTaskStream(stub: NezhaServiceCoroutineStub): Unit = coroutineScope {
         val results = Channel<TaskResult>(TASK_RESULT_BUFFER_CAPACITY)
         val shortTasks = Channel<Task>(SHORT_TASK_QUEUE_CAPACITY)
         val streamSessions = createStreamSessionRegistry()
+        // Workers and long sessions belong to this scope, outside the replaceable task producer.
+        val sessionScope = this
         val workers = List(SHORT_TASK_WORKER_COUNT) {
             launch {
                 for (task in shortTasks) executeShortTask(task, results)
             }
         }
         try {
-            val incoming = stub.requestTask(results.receiveAsFlow())
-                .buffer(TASK_INPUT_BUFFER_CAPACITY)
-                .produceIn(this)
-            try {
-                while (isActive) {
-                    val task = DashboardSessionWatchdog.receiveWithin(
-                        incoming,
-                        DashboardSessionWatchdog.TASK_IDLE_TIMEOUT_MS,
-                        "RequestTask stream"
-                    )
-                    routeIncomingTask(stub, task, shortTasks, results, streamSessions)
+            consumeWithIdleRestart(
+                idleTimeoutMillis = DashboardSessionWatchdog.TASK_IDLE_TIMEOUT_MS,
+                streamName = "RequestTask stream",
+                openStream = {
+                    stub.requestTask(results.receiveAsFlow())
+                        .buffer(TASK_INPUT_BUFFER_CAPACITY)
+                        .produceIn(this)
+                },
+                onIdleRestart = {
+                    Logger.i("AgentRuntime: 任务流空闲，仅重建任务流")
                 }
-            } finally {
-                incoming.cancel()
+            ) { task ->
+                routeIncomingTask(sessionScope, stub, task, shortTasks, results, streamSessions)
             }
         } finally {
             workers.forEach(Job::cancel)
@@ -375,7 +381,8 @@ internal class AgentRuntime(
         )
     )
 
-    private suspend fun CoroutineScope.routeIncomingTask(
+    private suspend fun routeIncomingTask(
+        sessionScope: CoroutineScope,
         stub: NezhaServiceCoroutineStub,
         task: Task,
         shortTasks: SendChannel<Task>,
@@ -387,13 +394,14 @@ internal class AgentRuntime(
             return
         }
         if (task.type in TaskTypes.STREAM_TASKS) {
-            launchStreamTask(stub, task, results, streamSessions)
+            launchStreamTask(sessionScope, stub, task, results, streamSessions)
         } else {
             enqueueShortTaskWithBackpressure(task, shortTasks, results)
         }
     }
 
-    private suspend fun CoroutineScope.launchStreamTask(
+    private suspend fun launchStreamTask(
+        sessionScope: CoroutineScope,
         stub: NezhaServiceCoroutineStub,
         task: Task,
         results: SendChannel<TaskResult>,
@@ -417,9 +425,9 @@ internal class AgentRuntime(
             }
         }
         val session = when (request) {
-            is StreamTaskRequest.Terminal -> launchTerminalSession(stub, request)
-            is StreamTaskRequest.Nat -> launchNatSession(stub, request)
-            is StreamTaskRequest.FileManager -> launchFileManagerSession(stub, request)
+            is StreamTaskRequest.Terminal -> sessionScope.launchTerminalSession(stub, request)
+            is StreamTaskRequest.Nat -> sessionScope.launchNatSession(stub, request)
+            is StreamTaskRequest.FileManager -> sessionScope.launchFileManagerSession(stub, request)
         }
         session.invokeOnCompletion { lease.close() }
     }
@@ -439,6 +447,7 @@ internal class AgentRuntime(
                 require(host.toByteArray(Charsets.UTF_8).size <= MAX_NAT_HOST_BYTES) {
                     "NAT Host exceeds the $MAX_NAT_HOST_BYTES-byte limit."
                 }
+                requireValidNatTarget(host)
                 StreamTaskRequest.Nat(task, streamId, host)
             }
             TaskTypes.FILE_MANAGER -> StreamTaskRequest.FileManager(task, streamId)
@@ -483,7 +492,7 @@ internal class AgentRuntime(
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (exception: Exception) {
-            Logger.e("$taskName 任务执行失败 (TaskID=${task.id}, Type=${task.type})", exception)
+            Logger.e("$taskName 任务执行失败 (TaskID=${task.id}, Error=${exception.javaClass.simpleName})")
         }
     }
 
@@ -538,7 +547,7 @@ internal class AgentRuntime(
             Logger.e("AgentRuntime: 连接中断，关闭通道后重试", failure)
         }
         grpcConnection.disconnect(preserveConnectionState = true)
-        delay(DashboardSessionWatchdog.RECONNECT_BACKOFF_MS)
+        delay(reconnectBackoff.nextDelayMillis())
         runCatching { grpcConnection.connect() }
             .onFailure { Logger.e("AgentRuntime: gRPC 通道重建失败，将继续重试", it) }
     }

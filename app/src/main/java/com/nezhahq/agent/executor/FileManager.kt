@@ -61,7 +61,15 @@ class FileManager internal constructor(
     private val outputChannel = Channel<Nezha.IOStreamData>(OUTPUT_BUFFER_CAPACITY)
     private val closed = AtomicBoolean(false)
 
-    @Volatile private var uploadSession: UploadSession? = null
+    private sealed interface UploadState {
+        data object Idle : UploadState
+        data class Active(val session: UploadSession) : UploadState
+        // The protocol has no frame marker separating residual content from a new opcode. A
+        // failed upload therefore drains this stream permanently; recovery requires a new session.
+        data object Aborted : UploadState
+    }
+
+    @Volatile private var uploadState: UploadState = UploadState.Idle
 
     suspend fun run() {
         try {
@@ -71,7 +79,7 @@ class FileManager internal constructor(
                     .setData(ByteString.copyFrom(header))
                     .build()
                 outputChannel.send(headerMsg)
-                Logger.i("FileManager: 已发送 StreamID 握手帧 (StreamID=$streamId)")
+                Logger.i("FileManager: 已发送会话握手帧")
 
                 launch { keepAliveLoop() }
 
@@ -79,25 +87,30 @@ class FileManager internal constructor(
                     val bytes = ioData.data.toByteArray()
                     if (bytes.isEmpty()) return@collect
 
-                    if (uploadSession != null) {
-                        handleUploadChunk(bytes)
-                        return@collect
+                    when (val state = uploadState) {
+                        is UploadState.Active -> {
+                            handleUploadChunk(state.session, bytes)
+                            return@collect
+                        }
+                        UploadState.Aborted -> return@collect
+                        UploadState.Idle -> Unit
                     }
 
                     when (bytes[0].toInt() and 0xFF) {
                         0x00 -> {
                             val dirPath = String(bytes, 1, bytes.size - 1, Charsets.UTF_8)
-                            Logger.i("FileManager: 收到列目录请求: $dirPath (StreamID=$streamId)")
+                            Logger.i("FileManager: 收到列目录请求")
                             listDir(dirPath)
                         }
                         0x01 -> {
                             val filePath = String(bytes, 1, bytes.size - 1, Charsets.UTF_8)
-                            Logger.i("FileManager: 收到下载请求: $filePath (StreamID=$streamId)")
+                            Logger.i("FileManager: 收到下载请求")
                             withContext(Dispatchers.IO) { download(filePath) }
                         }
                         0x02 -> {
                             if (bytes.size < UPLOAD_MIN_REQUEST_BYTES) {
-                                sendError("上传请求数据无效（数据长度不足 9 字节）")
+                                abortUploadSession()
+                                sendError("上传请求数据无效（数据长度不足 9 字节）；请重新打开文件管理会话")
                                 return@collect
                             }
                             val fileSize = ByteBuffer.wrap(bytes, UPLOAD_HEADER_OFFSET, UPLOAD_SIZE_BYTES)
@@ -108,19 +121,21 @@ class FileManager internal constructor(
                                 bytes.size - UPLOAD_PATH_OFFSET,
                                 Charsets.UTF_8
                             )
-                            Logger.i("FileUpload: 收到上传请求: $targetPath (size=$fileSize) (StreamID=$streamId)")
+                            Logger.i("FileUpload: 收到上传请求")
 
                             val session = try {
                                 beginUpload(targetPath, fileSize)
                             } catch (e: IllegalArgumentException) {
-                                Logger.e("FileUpload: 上传请求被拒绝: ${e.message}")
-                                sendError(e.message ?: "上传请求无效")
+                                abortUploadSession()
+                                Logger.e("FileUpload: 上传请求被拒绝 (Error=${e.javaClass.simpleName})")
+                                sendError("${e.message ?: "上传请求无效"}；请重新打开文件管理会话")
                                 return@collect
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (e: Exception) {
-                                Logger.e("FileUpload: 无法创建临时缓存文件: $targetPath (StreamID=$streamId)", e)
-                                sendError("无法创建临时缓存文件: ${e.message}")
+                                abortUploadSession()
+                                Logger.e("FileUpload: 无法创建临时缓存文件 (Error=${e.javaClass.simpleName})")
+                                sendError("无法创建临时缓存文件: ${e.message}；请重新打开文件管理会话")
                                 return@collect
                             }
 
@@ -135,7 +150,7 @@ class FileManager internal constructor(
         } catch (e: CancellationException) {
             if (!currentCoroutineContext().isActive) throw e
         } catch (e: Exception) {
-            Logger.i("FileManager: 文件管理器会话结束 (StreamID=$streamId): ${e.message}")
+            Logger.i("FileManager: 文件管理器会话结束 (Error=${e.javaClass.simpleName})")
         }
     }
 
@@ -143,10 +158,11 @@ class FileManager internal constructor(
         targetPath: String,
         declaredSize: Long
     ): UploadSession = withContext(Dispatchers.IO) {
+        UploadSession.validateDeclaredSize(declaredSize)
         val cacheFile = File.createTempFile("nezha_upload_", ".tmp", context.cacheDir)
         try {
             UploadSession.create(targetPath, declaredSize, cacheFile).also {
-                uploadSession = it
+                uploadState = UploadState.Active(it)
             }
         } catch (e: Exception) {
             try {
@@ -182,11 +198,11 @@ class FileManager internal constructor(
             if (shellEntries != null) {
                 if (!dir.endsWith("/")) dir += "/"
                 val response = buildListDirResponse(dir, shellEntries)
-                Logger.i("FileManager: RootShell ls 列目录成功: $dir, 共 ${shellEntries.size} 条目 (StreamID=$streamId)")
+                Logger.i("FileManager: 高权限列目录成功")
                 sendData(response)
                 return
             }
-            Logger.i("FileManager: RootShell ls 无法访问 $dir，回退到 Java IO...")
+            Logger.i("FileManager: 高权限列目录失败，回退到 Java IO")
         }
 
         // ── 策略 2：Java IO（普通模式或 Root ls 失败时）───────────────────
@@ -200,7 +216,7 @@ class FileManager internal constructor(
                 FileEntry(file.name, isDir)
             }
             if (!dir.endsWith("/")) dir += "/"
-            Logger.i("FileManager: Java IO 列目录成功: $dir, 共 ${entries.size} 条目 (StreamID=$streamId)")
+            Logger.i("FileManager: Java IO 列目录成功")
             val response = buildListDirResponse(dir, entries)
             sendData(response)
             return
@@ -210,11 +226,11 @@ class FileManager internal constructor(
         // [安全修复] 原实现在 rootMode=false 时仍会回退到 RootShell/su 提权，
         // 导致用户以为关闭了高权限模式，文件管理器仍可能获得高权限。
         if (!isRootMode) {
-            Logger.i("FileManager: Java IO listFiles() 返回 null/空 (dir=$dir, exists=${javaFile.exists()}, canRead=${javaFile.canRead()})，rootMode=false，不尝试提权兜底")
+            Logger.i("FileManager: Java IO 列目录失败或为空，未授权高权限回退")
         }
 
         // ── 最终兜底：回退到 DEFAULT_HOME ───────────────────────────────────
-        Logger.i("FileManager: 所有方式均无法访问 $dir，回退到 $DEFAULT_HOME")
+        Logger.i("FileManager: 无法访问目录，回退到默认目录")
         dir = DEFAULT_HOME
         // 兜底路径也优先 Root ls
         if (isRootMode) {
@@ -301,7 +317,7 @@ class FileManager internal constructor(
                     try {
                         inputStream.close()
                     } catch (e: Exception) {
-                        Logger.e("FileManager: 关闭下载流失败: $filePath (StreamID=$streamId)", e)
+                        Logger.e("FileManager: 关闭下载流失败 (Error=${e.javaClass.simpleName})")
                     }
                 }
             }
@@ -335,7 +351,7 @@ class FileManager internal constructor(
                             sendData(buffer.copyOf(bytesRead))
                         }
                     }
-                    Logger.i("FileManager: 文件下载完成: $filePath (StreamID=$streamId)")
+                    Logger.i("FileManager: 文件下载完成")
                 } finally {
                     cancellationCloser.cancel()
                     withContext(NonCancellable + Dispatchers.IO) {
@@ -345,61 +361,57 @@ class FileManager internal constructor(
             }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            Logger.e("FileManager: 下载失败: $filePath (StreamID=$streamId)", e)
+            Logger.e("FileManager: 下载失败 (Error=${e.javaClass.simpleName})")
             sendError("下载失败: ${e.message}")
         }
     }
 
-    private suspend fun handleUploadChunk(data: ByteArray) {
-        val session = uploadSession ?: return
+    private suspend fun handleUploadChunk(session: UploadSession, data: ByteArray) {
         try {
             when (val result = withContext(Dispatchers.IO) { session.writeChunk(data) }) {
                 UploadWriteResult.AwaitingMore -> return
                 UploadWriteResult.Complete -> completeUpload(session)
                 is UploadWriteResult.Rejected -> {
-                    Logger.e("FileUpload: 上传校验失败: ${result.message} (StreamID=$streamId)")
-                    sendError(result.message)
                     abortUploadSession()
+                    Logger.e("FileUpload: 上传校验失败 (Error=DeclaredSizeExceeded)")
+                    sendError("${result.message}；请重新打开文件管理会话")
                 }
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Logger.e("FileUpload: 写入缓存文件失败: ${session.targetPath} (StreamID=$streamId)", e)
-            sendError("写入文件失败: ${e.message}")
             abortUploadSession()
+            Logger.e("FileUpload: 写入缓存文件失败 (Error=${e.javaClass.simpleName})")
+            sendError("写入文件失败: ${e.message}；请重新打开文件管理会话")
         }
     }
 
     private suspend fun completeUpload(session: UploadSession) {
+        var saved = false
         try {
             withContext(Dispatchers.IO) {
                 session.close()
             }
-            Logger.i("FileUpload: 文件传输到缓存完成，正在移动到目标路径: ${session.targetPath} (StreamID=$streamId)")
+            Logger.i("FileUpload: 缓存完成，正在保存")
             if (moveFileToTarget(session.cacheFile, session.targetPath)) {
+                saved = true
                 sendData(COMPLETE_IDENTIFIER)
-                Logger.i("FileUpload: 文件上传完成: ${session.targetPath} (StreamID=$streamId)")
+                Logger.i("FileUpload: 文件上传完成")
             } else {
-                sendError("文件保存失败，目标路径权限不足: ${session.targetPath}")
-                Logger.e("FileUpload: 无法将缓存文件移动到目标路径: ${session.targetPath}")
+                uploadState = UploadState.Aborted
+                sendError("文件保存失败，请检查目标类型、权限和剩余空间: ${session.targetPath}；请重新打开文件管理会话")
+                Logger.e("FileUpload: 无法保存到目标路径")
             }
         } finally {
-            clearUploadSession(deleteCache = true)
+            uploadState = if (saved) UploadState.Idle else UploadState.Aborted
+            session.abort()
         }
     }
 
     private fun abortUploadSession() {
-        uploadSession?.abort()
-        uploadSession = null
-    }
-
-    private fun clearUploadSession(deleteCache: Boolean) {
-        val session = uploadSession
-        uploadSession = null
-        if (deleteCache) {
-            try { session?.cacheFile?.delete() } catch (_: Exception) {}
-        }
+        val session = (uploadState as? UploadState.Active)?.session
+        uploadState = UploadState.Aborted
+        session?.abort()
     }
 
     private suspend fun moveFileToTarget(sourceFile: File, targetPath: String): Boolean {
@@ -408,6 +420,7 @@ class FileManager internal constructor(
         // 第一次尝试：Java API
         try {
             val target = File(targetPath)
+            if (target.isDirectory) return false
             target.parentFile?.mkdirs()
             withContext(Dispatchers.IO) {
                 sourceFile.copyTo(target, overwrite = true)
@@ -479,10 +492,10 @@ class FileManager internal constructor(
                 RootShell.openCommandInputStream("cat ${shellEscape(path)}")
             }
             if (privilegedInput != null) {
-                Logger.i("FileManager: 使用集中授权的 Root/Shizuku Shell 读取文件: $path")
+                Logger.i("FileManager: 使用已授权高权限读取文件")
                 return privilegedInput
             }
-            Logger.i("FileManager: 高权限读取不可用，回退到 Java IO: $path")
+            Logger.i("FileManager: 高权限读取不可用，回退到 Java IO")
         }
 
         // ── 策略 2：Java FileInputStream ────────────────────────────────
@@ -551,14 +564,14 @@ class FileManager internal constructor(
     }
 
     private suspend fun sendError(message: String) {
-        Logger.e("FileManager: 发送错误: $message (StreamID=$streamId)")
+        Logger.e("FileManager: 向面板报告操作失败")
         val errorBytes = ERROR_IDENTIFIER + message.toByteArray(Charsets.UTF_8)
         sendData(errorBytes)
     }
 
     private fun close() {
         if (closed.getAndSet(true)) return
-        Logger.i("FileManager: 正在关闭文件管理器会话 (StreamID=$streamId)")
+        Logger.i("FileManager: 正在关闭文件管理会话")
         abortUploadSession()
         outputChannel.close()
     }

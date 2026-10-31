@@ -78,7 +78,7 @@ class TerminalManager(
                     startAndAttachShell()
                 }
                 val shellProcess = checkNotNull(process) { "Shell process was not attached." }
-                Logger.i("TerminalManager: Shell 子进程已启动 (type=$shellType, StreamID=$streamId)")
+                Logger.i("TerminalManager: Shell 子进程已启动 (type=$shellType)")
 
                 // 2. 启动 stdout 读取协程
                 launch(Dispatchers.IO) {
@@ -144,7 +144,7 @@ class TerminalManager(
         } catch (e: CancellationException) {
             if (!currentCoroutineContext().isActive) throw e
         } catch (e: Exception) {
-            Logger.i("TerminalManager: 终端会话结束 (StreamID=$streamId): ${e.message}")
+            Logger.i("TerminalManager: 终端会话结束 (Error=${e.javaClass.simpleName})")
         }
     }
 
@@ -156,7 +156,7 @@ class TerminalManager(
     /** 关闭终端会话。 */
     fun close() {
         if (closed.getAndSet(true)) return
-        Logger.i("TerminalManager: 正在关闭终端会话 (StreamID=$streamId)")
+        Logger.i("TerminalManager: 正在关闭终端会话")
         val managed = privilegedProcess
         if (managed != null) {
             managed.close()
@@ -269,7 +269,7 @@ class TerminalManager(
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (e: Exception) {
-            Logger.e("TerminalManager: 虚拟指令执行异常", e)
+            Logger.e("TerminalManager: 虚拟指令执行异常 (Error=${e.javaClass.simpleName})")
             sendOutput("❌ 指令执行异常: ${e.message}\r\n")
         }
     }
@@ -281,7 +281,7 @@ class TerminalManager(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            if (!closed.get()) Logger.e("TerminalManager: 排队写入 Shell stdin 失败", e)
+            if (!closed.get()) Logger.e("TerminalManager: 排队写入 Shell stdin 失败 (Error=${e.javaClass.simpleName})")
         }
     }
 
@@ -295,7 +295,7 @@ class TerminalManager(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            if (!closed.get()) Logger.e("TerminalManager: 写入 Shell stdin 失败", e)
+            if (!closed.get()) Logger.e("TerminalManager: 写入 Shell stdin 失败 (Error=${e.javaClass.simpleName})")
         }
     }
 
@@ -332,7 +332,7 @@ class TerminalManager(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            if (!closed.get()) Logger.e("TerminalManager: 读取 Shell 输出异常", e)
+            if (!closed.get()) Logger.e("TerminalManager: 读取 Shell 输出异常 (Error=${e.javaClass.simpleName})")
         } finally {
             if (!closed.get()) {
                 try {

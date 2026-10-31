@@ -23,6 +23,8 @@ import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.InetAddress
+import java.net.ServerSocket
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -32,6 +34,22 @@ class TaskExecutorTest {
 
     @get:Rule
     val silentLogger = SilentLoggerRule()
+
+    @Test
+    fun aLegacyTcpHostPortActuallyConnectsToItsSpecifiedPort() = runBlocking {
+        ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { server ->
+            val task = Task.newBuilder()
+                .setId(103)
+                .setType(TaskTypes.TCP_PING)
+                .setData("127.0.0.1:${server.localPort}")
+                .build()
+
+            val result = TaskExecutor.executeTask(task, RemoteCapabilities())
+
+            assertTrue(result.data, result.successful)
+            assertEquals(103L, result.id)
+        }
+    }
     @After
     fun clearInterruptedStatus() {
         Thread.interrupted()
