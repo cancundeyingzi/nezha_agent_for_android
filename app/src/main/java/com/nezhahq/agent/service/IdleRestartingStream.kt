@@ -9,6 +9,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Consumes a stream until cancelled, replacing *only the stream* when it falls silent.
@@ -40,6 +41,7 @@ internal suspend fun <T> consumeWithIdleRestart(
     onStreamStarted: suspend (CoroutineScope) -> Unit = {},
     onStreamStopped: suspend () -> Unit = {},
     streamStopTimeoutMillis: Long = 5_000L,
+    nanoTime: () -> Long = System::nanoTime,
     onMessage: suspend (T) -> Unit
 ): Nothing {
     require(idleTimeoutMillis > 0) { "idleTimeoutMillis must be positive" }
@@ -53,14 +55,31 @@ internal suspend fun <T> consumeWithIdleRestart(
                     onStreamStarted(this)
                     val incoming = openStream()
                     try {
+                        var lastReceivedNanos = nanoTime()
+                        fun remainingMillis(): Long {
+                            val elapsed = (nanoTime() - lastReceivedNanos).coerceAtLeast(0) / 1_000_000
+                            return (idleTimeoutMillis - elapsed).coerceAtLeast(0)
+                        }
+                        fun idle() = DashboardSessionTimeoutException(
+                            "$streamName timed out after ${idleTimeoutMillis}ms without receiving a task"
+                        )
                         while (true) {
-                            val message = try {
-                                DashboardSessionWatchdog.receiveWithin(incoming, idleTimeoutMillis, streamName)
-                            } catch (idle: DashboardSessionTimeoutException) {
-                                onIdleRestart(idle)
+                            // Only these withTimeoutOrNull deadlines mean idle. Handler timeouts,
+                            // caller cancellation and all other failures keep their own identity.
+                            val received = withTimeoutOrNull(remainingMillis()) { Received(incoming.receive()) }
+                            if (received == null) {
+                                onIdleRestart(idle())
                                 break
                             }
-                            onMessage(message)
+                            lastReceivedNanos = nanoTime()
+                            val handled = withTimeoutOrNull(remainingMillis()) {
+                                onMessage(received.value)
+                                true
+                            }
+                            if (handled == null) {
+                                onIdleRestart(idle())
+                                break
+                            }
                         }
                     } finally {
                         incoming.cancel()
@@ -102,3 +121,5 @@ internal suspend fun <T> consumeWithIdleRestart(
         }
     }
 }
+
+private data class Received<T>(val value: T)

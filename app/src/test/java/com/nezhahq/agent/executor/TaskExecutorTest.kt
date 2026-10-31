@@ -69,13 +69,13 @@ class TaskExecutorTest {
 
     @Test
     fun unsupportedMcpTypesReturnExplicitFailure() = runBlocking {
-        val task = Task.newBuilder().setId(16L).setType(TaskTypes.FS_LIST).build()
+        val task = Task.newBuilder().setId(18L).setType(TaskTypes.FS_WRITE).build()
 
         val result = TaskExecutor.executeTask(task, RemoteCapabilities())
 
-        assertEquals(TaskTypes.FS_LIST, result.type)
+        assertEquals(TaskTypes.FS_WRITE, result.type)
         assertFalse(result.successful)
-        assertEquals(TaskTypes.unsupportedMessage(TaskTypes.FS_LIST), result.data)
+        assertEquals(TaskTypes.unsupportedMessage(TaskTypes.FS_WRITE), result.data)
     }
 
     @Test

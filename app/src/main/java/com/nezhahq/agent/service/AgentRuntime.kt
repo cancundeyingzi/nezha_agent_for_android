@@ -13,6 +13,9 @@ import com.nezhahq.agent.collector.SystemInfoCollector
 import com.nezhahq.agent.collector.SystemStateCollector
 import com.nezhahq.agent.core.model.AgentConfig
 import com.nezhahq.agent.core.model.RemoteCapabilities
+import com.nezhahq.agent.core.mcp.McpPolicy
+import com.nezhahq.agent.core.mcp.McpProtocolVersion
+import com.nezhahq.agent.core.mcp.McpTaskFamily
 import com.nezhahq.agent.core.task.RemoteCapabilityPolicy
 import com.nezhahq.agent.core.task.TaskTypes
 import com.nezhahq.agent.executor.FileManager
@@ -25,6 +28,11 @@ import com.nezhahq.agent.grpc.GrpcConnectionState
 import com.nezhahq.agent.grpc.GrpcManager
 import com.nezhahq.agent.grpc.GrpcTransportMode
 import com.nezhahq.agent.grpc.ManagedGrpcConnection
+import com.nezhahq.agent.mcp.McpSession
+import com.nezhahq.agent.mcp.McpTaskBackend
+import com.nezhahq.agent.mcp.exec.McpExecBackend
+import com.nezhahq.agent.mcp.fs.McpFsBackend
+import com.nezhahq.agent.mcp.privileged.McpHelperLaunchers
 import com.nezhahq.agent.service.keepalive.KeepAliveController
 import com.nezhahq.agent.util.Logger
 import com.nezhahq.agent.util.RootShell
@@ -51,7 +59,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.produceIn
-import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -129,6 +136,16 @@ internal class AgentRuntime(
     private val gpuCollector = GpuCollector()
     private val stateCollector = SystemStateCollector(appContext, gpuCollector, ioDispatcher)
     private val capabilities = AtomicReference(config.remoteCapabilities)
+    private val currentMcpSession = AtomicReference<McpSession?>()
+    private val mcpLauncher = McpHelperLaunchers.select(appContext, config.rootMode)
+    private val mcpExec = McpExecBackend(mcpLauncher)
+    private val mcpFs = McpFsBackend(mcpLauncher)
+    private val mcpBackend = McpTaskBackend { task, snapshot, reserveResult ->
+        when (McpPolicy.family(task.type)) {
+            McpTaskFamily.EXEC -> mcpExec.execute(task, snapshot, reserveResult = reserveResult)
+            else -> mcpFs.execute(task, snapshot, reserveResult = reserveResult)
+        }
+    }
     private val reconnectBackoff = ReconnectBackoffPolicy()
 
     private var state = LifecycleState.NEW
@@ -177,6 +194,7 @@ internal class AgentRuntime(
 
     override suspend fun updateCapabilities(capabilities: RemoteCapabilities) {
         this.capabilities.set(capabilities)
+        currentMcpSession.get()?.revokeDisabled(capabilities)
     }
 
     /**
@@ -282,7 +300,7 @@ internal class AgentRuntime(
     private suspend fun reportInitialDashboardInfo(stub: NezhaServiceCoroutineStub) {
         val hostInfo = SystemInfoCollector.getHostInfo(
             context = appContext,
-            appVersion = getAppVersionName(),
+            appVersion = McpProtocolVersion.hostVersion(getAppVersionName()),
             gpuCollector = gpuCollector,
             isRootMode = RootShell.isAuthorized()
         )
@@ -350,20 +368,37 @@ internal class AgentRuntime(
                 for (task in shortTasks) executeShortTask(task, results)
             }
         }
+        var registration: McpSession? = null
         try {
             consumeWithIdleRestart(
                 idleTimeoutMillis = DashboardSessionWatchdog.TASK_IDLE_TIMEOUT_MS,
                 streamName = "RequestTask stream",
+                onStreamStarted = { streamScope ->
+                    McpSession(streamScope, capabilities::get, mcpBackend).also {
+                        registration = it
+                        currentMcpSession.set(it)
+                    }
+                },
                 openStream = {
-                    stub.requestTask(results.receiveAsFlow())
+                    // Capture this registration; asynchronous work never looks up its successor.
+                    val mcp = checkNotNull(registration)
+                    stub.requestTask(mcp.outgoingWith(results))
                         .buffer(TASK_INPUT_BUFFER_CAPACITY)
                         .produceIn(this)
+                },
+                onStreamStopped = {
+                    registration?.let { stopped ->
+                        currentMcpSession.compareAndSet(stopped, null)
+                        stopped.close()
+                    }
+                    registration = null
                 },
                 onIdleRestart = {
                     Logger.i("AgentRuntime: 任务流空闲，仅重建任务流")
                 }
             ) { task ->
-                routeIncomingTask(sessionScope, stub, task, shortTasks, results, streamSessions)
+                routeIncomingTask(sessionScope, stub, task, shortTasks, results, streamSessions,
+                    checkNotNull(registration))
             }
         } finally {
             workers.forEach(Job::cancel)
@@ -387,8 +422,13 @@ internal class AgentRuntime(
         task: Task,
         shortTasks: SendChannel<Task>,
         results: SendChannel<TaskResult>,
-        streamSessions: StreamSessionRegistry
+        streamSessions: StreamSessionRegistry,
+        mcpSession: McpSession
     ) {
+        if (McpPolicy.family(task.type) != null) {
+            mcpSession.handle(task)
+            return
+        }
         RemoteCapabilityPolicy.denialReason(task.type, capabilities.get())?.let { reason ->
             reportTaskFailure(task, reason, results)
             return
@@ -624,7 +664,7 @@ internal class AgentRuntime(
     private companion object {
         const val SHORT_TASK_WORKER_COUNT = 8
         const val SHORT_TASK_QUEUE_CAPACITY = 64
-        const val TASK_INPUT_BUFFER_CAPACITY = 16
+        const val TASK_INPUT_BUFFER_CAPACITY = 0
         const val TASK_RESULT_BUFFER_CAPACITY = 8
         const val MAX_STREAM_SESSIONS = 36
         const val MAX_TERMINAL_SESSIONS = 2

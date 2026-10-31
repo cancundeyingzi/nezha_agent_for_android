@@ -10,7 +10,7 @@ enum class McpTaskFamily(val taskType: Long, val capability: RemoteCapability) {
     FS_READ(TaskTypes.FS_READ, RemoteCapability.FILE_MANAGER)
 }
 
-/** R1 identification only; this does not advertise handlers as installed in the existing runtime. */
+/** R1 families installed in the Runtime's dedicated, registration-scoped MCP dispatcher. */
 object McpPolicy {
     fun family(taskType: Long): McpTaskFamily? = when (taskType) {
         TaskTypes.EXEC -> McpTaskFamily.EXEC

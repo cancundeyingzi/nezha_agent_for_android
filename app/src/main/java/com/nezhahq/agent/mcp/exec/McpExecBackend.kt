@@ -23,8 +23,7 @@ import proto.Nezha.Task
 import proto.Nezha.TaskResult
 
 /**
- * Standalone backend, deliberately not registered with AgentRuntime yet. Runtime still owns task
- * admission, its two live policy checks, selection/authorization and final send/drop ownership.
+ * Runtime owns task admission, live policy checks, launcher selection and final send/drop ownership.
  * This backend checks the supplied capability snapshot before launching and never gains privilege.
  */
 class McpExecBackend(

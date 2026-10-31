@@ -341,7 +341,7 @@ fun ConfigScreenContent(
                     vm.toggleRemoteCommand(newValue)
                 },
                 title = "允许面板远程执行命令",
-                description = "允许 TaskType 4 命令和新建交互终端 Shell；关闭后新请求立即生效",
+                description = "允许命令、交互终端和 MCP Exec；关闭后拒绝新请求并取消活动 MCP 命令",
                 enabled = vm.canEditConfig
             )
             if (vm.enableRemoteCommand) {
@@ -362,7 +362,7 @@ fun ConfigScreenContent(
                     vm.toggleRemoteFileManager(newValue)
                 },
                 title = "允许面板远程管理文件",
-                description = "允许 TaskType 11 浏览、下载和上传设备文件；关闭后新请求立即生效",
+                description = "允许文件管理和 MCP 目录列表、文件读取；关闭后拒绝新请求并取消活动 MCP 文件任务",
                 enabled = vm.canEditConfig
             )
             if (vm.enableRemoteFileManager) {

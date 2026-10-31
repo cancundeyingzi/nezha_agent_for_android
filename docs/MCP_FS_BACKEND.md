@@ -1,6 +1,6 @@
 # MCP FsList / FsRead 后端（DEV05）
 
-Task16/17 沿用现有 DTO、严格 JSON 解析、`Successful` 语义和每任务 `app_process` 通道。`HelperMain` 注册 Exec、FsList、FsRead；文件处理器只产生 RESULT 帧。`McpFsBackend` 尚未接 Runtime，也未修改旧 unsupported 清单、旧 FileManager 或 Host.version。高权限启动器由 DEV06 接入，所有文件操作只发生在所选 helper 的实际 UID 下。
+Task16/17 沿用现有 DTO、严格 JSON 解析、`Successful` 语义和每任务 `app_process` 通道。`HelperMain` 注册 Exec、FsList、FsRead；文件处理器只产生 RESULT 帧。DEV08a 已将 `McpFsBackend` 接入 Runtime，当前准入、预算和撤权行为见 [R1_RUNTIME.md](R1_RUNTIME.md)。旧 FileManager 继续使用原协议。高权限启动器由 DEV06 提供，所有文件操作只发生在所选 helper 的实际 UID 下。
 
 ## 路径与 fd
 

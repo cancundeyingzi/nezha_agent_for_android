@@ -43,7 +43,7 @@ class McpContractTest {
     }
 
     @Test
-    fun r1PolicyUsesCurrentGrantAndKeepsUninstalledHandlersUnsupported() {
+    fun r1PolicyUsesCurrentGrantAndAdvertisesOnlyInstalledHandlers() {
         assertEquals(McpTaskFamily.EXEC, McpPolicy.family(15))
         assertEquals(McpTaskFamily.FS_LIST, McpPolicy.family(16))
         assertEquals(McpTaskFamily.FS_READ, McpPolicy.family(17))
@@ -58,7 +58,8 @@ class McpContractTest {
         assertNotNull(McpPolicy.denial(15, RemoteCapabilities(fileManagerEnabled = true)))
         assertNull(McpPolicy.denial(16, RemoteCapabilities(fileManagerEnabled = true)))
         assertNotNull(McpPolicy.denial(16, RemoteCapabilities()))
-        (12L..20L).forEach { assertTrue(TaskTypes.isKnownUnsupportedOnAndroid(it)) }
+        listOf(12L, 13L, 14L, 18L, 19L, 20L).forEach { assertTrue(TaskTypes.isKnownUnsupportedOnAndroid(it)) }
+        (15L..17L).forEach { assertFalse(TaskTypes.isKnownUnsupportedOnAndroid(it)) }
     }
 
     @Test

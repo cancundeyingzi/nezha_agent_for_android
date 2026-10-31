@@ -20,7 +20,9 @@ class DashboardSessionWatchdogTest {
     fun taskIdleReplacementHasALongerBudgetThanTheHeartbeat() {
         assertEquals(5_000L, DashboardSessionWatchdog.HANDSHAKE_TIMEOUT_MS)
         assertEquals(10_000L, DashboardSessionWatchdog.STATE_RECEIPT_TIMEOUT_MS)
-        assertEquals(300_000L, DashboardSessionWatchdog.TASK_IDLE_TIMEOUT_MS)
+        assertEquals(360_000L, DashboardSessionWatchdog.TASK_IDLE_TIMEOUT_MS)
+        assertTrue(DashboardSessionWatchdog.TASK_IDLE_TIMEOUT_MS >
+            com.nezhahq.agent.core.mcp.McpLimits.MAX_EXEC_TIMEOUT_SECONDS * 1000 + 30_000L)
         assertEquals(2_000L, DashboardSessionWatchdog.STATE_REPORT_INTERVAL_MS)
     }
 

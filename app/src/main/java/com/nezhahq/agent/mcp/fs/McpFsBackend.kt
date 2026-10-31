@@ -22,7 +22,7 @@ import kotlinx.coroutines.ensureActive
 import proto.Nezha.Task
 import proto.Nezha.TaskResult
 
-/** Standalone DEV05 backend. Runtime/admission wiring and selected privilege launchers come later. */
+/** Runtime supplies the selected launcher, capability snapshot and registration's result budget. */
 class McpFsBackend(
     private val launcher: HelperLauncher,
     private val transport: McpHelperTransport = McpHelperTransport(),

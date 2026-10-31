@@ -39,7 +39,7 @@
 | DEV05 | 有界目录枚举、普通文件分段读取和 fd 校验 | 实现、双审查及构建检查通过；API36 debug/R8各25例、API23读/能力边界通过 |
 | DEV06 | Root/Shizuku 适配与明确能力错误 | 实现及需求/质量复审通过；普通/高权 helper 已设备验证，真实 SukiSU 授权链待手测 |
 | DEV07 | State.gpus=18、旧 gpu=17 同采样映射 | 实现、需求/质量审查、40/436 单测及 release/R8/lint 通过 |
-| DEV08 | 单测、lint 门禁、release、设备/面板/稳定性验证 | 待实施 |
+| DEV08 | Runtime、门禁、测试包及设备/面板/稳定性验证 | Runtime 双审、40/457 单测、R8/lint及本地三任务往返通过；循环与测试包进行中 |
 
 ## 本轮必须落实的边界
 
@@ -152,3 +152,13 @@ API26+ 的 FsList 使用已打开目录 fd 的 `/proc/self/fd` 锚定路径进�
 - 需求与质量审查通过；40 项 core、436 项 app 单测全部通过，release/R8、lint 通过。独立 sandbox protoc 的 Windows DLL 启动错误没有在标准 Gradle 构建路径复现。
 - 全量检查另暴露旧启动重试测试的观察竞态：onStart 发信号早于 controller 发布 current。测试改为等待同一控制器的串行操作后再断言，保留重试次数/退避序列等全部断言，并保证失败时清理；业务代码未更改。
 - Android15/17 SukiSU 的 GPU 来源可读性和实际面板展示仍待手测，不以 wire fixture 代替硬件验证。
+
+## DEV08a Runtime 接线与首轮联调
+
+- 每次 RequestTask 注册创建独立 McpSession；15–17 在旧任务 worker 前分流，独立执行配额、请求/结果 wire 字节预算、撤权子任务和 Owned 队列。最终 collector 完成发送/丢弃后才归还结果预算，旧会话不会向新注册写 MCP 结果。
+- 权限关闭取消对应活动 MCP 后端，等待清理交接后仅回一次同族拒绝；更新不等待网络或结果预算。任务流 idle 改 360 秒，同一期限覆盖 handler 背压及下一次接收；旧 producer/流内任务完成取消 join 后再重建，旧长会话作用域保持。
+- 真实节点 Host.version 在上报边界使用 `2.1.0+android.<实际应用版本>`，旧 15–17 unsupported 清单同步移除；12–14、18–20 继续明确拒绝，Task4 旧语义不变。
+- 需求与质量审查通过，40 项 core、457 项 app 单测、debug、release/R8、lint 全部通过。
+- 本地 Dashboard v2.6.1 与 API36 / 16 KiB 页通过真实 gRPC/MCP：普通 UID、argv 元字符、独立 stdout/stderr 和 exit7、含 NUL 的 stdin/EOF、环境隔离、启动也计入的短期限、超时保留输出、两路截断、JSON 膨胀后的有界错误、特殊名目录、5011 项目录完整 total/5000 条上限、分段 Base64/段 SHA256、最终软链接拒绝，以及两条长 Exec 满额后第三条 busy、文件请求仍可完成。临时只读/执行令牌在本次验证结束即撤销。
+- 1 秒期限可能在 helper 启动阶段到期，不能据此强求已经产生 stdout；短期限用例验证有限返回，输出保留用例采用 5 秒，符合总期限包含启动开销的定义。
+- 同进程 100 次真实连接重建和命令取消、完整混淆 App、API23 联调、并存测试 APK 与最终验收记录继续在 DEV08 完成。

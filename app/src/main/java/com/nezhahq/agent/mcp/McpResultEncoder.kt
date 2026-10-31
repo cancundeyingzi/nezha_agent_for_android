@@ -123,7 +123,7 @@ class McpResultEncoder(private val maxResultBytes: Int = McpLimits.MAX_TASK_RESU
         )
     }
 
-    private fun internalFailure(id: Long, type: Long): TaskResult = envelope(id, type, false)
+    internal fun internalFailure(id: Long, type: Long): TaskResult = envelope(id, type, false)
         .setData(INTERNAL_ENCODING_FAILURE)
         .build()
 

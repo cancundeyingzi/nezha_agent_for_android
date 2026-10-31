@@ -29,6 +29,98 @@ import org.junit.Test
 class IdleRestartingStreamTest {
 
     @Test
+    fun idleDeadlineAlsoExpiresWhileTheMessageHandlerIsBackpressured() = runBlocking {
+        val handlerEntered = CompletableDeferred<Unit>()
+        val handlerStopped = CompletableDeferred<Unit>()
+        val replacementOpened = CompletableDeferred<Unit>()
+        var opens = 0
+        val consumer = launch {
+            consumeWithIdleRestart<String>(
+                idleTimeoutMillis = SHORT_IDLE_EXPIRY_MILLIS,
+                streamName = "backpressured stream",
+                openStream = {
+                    val generation = ++opens
+                    if (generation == 2) replacementOpened.complete(Unit)
+                    flow<String> {
+                        if (generation == 1) emit("blocked")
+                        awaitCancellation()
+                    }.produceIn(this)
+                }
+            ) {
+                handlerEntered.complete(Unit)
+                try { awaitCancellation() } finally { handlerStopped.complete(Unit) }
+            }
+        }
+        try {
+            withTimeout(TEST_TIMEOUT_MILLIS) { handlerEntered.await(); replacementOpened.await() }
+            assertTrue(handlerStopped.isCompleted)
+        } finally { consumer.cancelAndJoin() }
+    }
+
+    @Test
+    fun handlerTimeConsumesTheSameDeadlineAsTheFollowingReceive() = runBlocking {
+        var nanos = 0L
+        var opens = 0
+        val replacementOpened = CompletableDeferred<Unit>()
+        val consumer = launch {
+            consumeWithIdleRestart<String>(
+                idleTimeoutMillis = NO_IDLE_EXPIRY_MILLIS,
+                streamName = "shared deadline",
+                nanoTime = { nanos },
+                openStream = {
+                    val generation = ++opens
+                    if (generation == 2) replacementOpened.complete(Unit)
+                    flow<String> {
+                        if (generation == 1) emit("work")
+                        awaitCancellation()
+                    }.produceIn(this)
+                }
+            ) { nanos += NO_IDLE_EXPIRY_MILLIS * 1_000_000 }
+        }
+        try {
+            withTimeout(TEST_TIMEOUT_MILLIS) { replacementOpened.await() }
+            assertTrue(opens >= 2)
+        } finally { consumer.cancelAndJoin() }
+    }
+
+    @Test
+    fun aHandlerDashboardTimeoutIsNotMistakenForTheInternalIdleDeadline() {
+        var opens = 0
+        val failure = assertThrows(DashboardSessionTimeoutException::class.java) {
+            runBlocking {
+                consumeWithIdleRestart<String>(
+                    idleTimeoutMillis = NO_IDLE_EXPIRY_MILLIS,
+                    streamName = "handler failure",
+                    openStream = {
+                        opens++
+                        flow { emit("work"); awaitCancellation() }.produceIn(this)
+                    }
+                ) { throw DashboardSessionTimeoutException("handler's own timeout") }
+            }
+        }
+        assertEquals("handler's own timeout", failure.message)
+        assertEquals(1, opens)
+    }
+
+    @Test
+    fun aHandlerCoroutineTimeoutPropagatesWithoutRestartingTheStream() {
+        var opens = 0
+        assertThrows(kotlinx.coroutines.TimeoutCancellationException::class.java) {
+            runBlocking {
+                consumeWithIdleRestart<String>(
+                    idleTimeoutMillis = NO_IDLE_EXPIRY_MILLIS,
+                    streamName = "handler timeout",
+                    openStream = {
+                        opens++
+                        flow { emit("work"); awaitCancellation() }.produceIn(this)
+                    }
+                ) { withTimeout(SHORT_IDLE_EXPIRY_MILLIS) { awaitCancellation() } }
+            }
+        }
+        assertEquals(1, opens)
+    }
+
+    @Test
     fun cancellationArrivingDuringAnIdleStopHookStillPreventsReplacement() = runBlocking {
         val stopHookEntered = CompletableDeferred<Unit>()
         val observedFailure = CompletableDeferred<Throwable>()

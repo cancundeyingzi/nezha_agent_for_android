@@ -1,6 +1,6 @@
 # R1 MCP 公共协议与限额
 
-本文件记录 DEV03 的协议边界。DTO、解析器、编码器与准入规则已提供；本工作包不安装任务处理器，不修改现有 `AgentRuntime`、`TaskExecutor`、`TaskTypes.isKnownUnsupportedOnAndroid`、配置、UI 或采集器。因此当前旧执行入口仍将 15–17 标为 unsupported，不能据此宣称设备已支持 MCP。
+本文件记录 DEV03 提供的 DTO、解析器、编码器与准入规则。后续 DEV08a 已将 15–17 接入 Runtime 并从 unsupported 清单删除；当前会话、授权、预算和版本上报行为见 [R1_RUNTIME.md](R1_RUNTIME.md)。下文的集成要求保留为协议约束。
 
 固定参考为 Go Agent `c2b65ab6fa8926f3c7ed4ef3a0065fe003410237` 的 [model/task.go](https://github.com/nezhahq/agent/blob/c2b65ab6fa8926f3c7ed4ef3a0065fe003410237/model/task.go)、[mcp_exec.go](https://github.com/nezhahq/agent/blob/c2b65ab6fa8926f3c7ed4ef3a0065fe003410237/cmd/agent/mcp_exec.go)、[mcp_handlers.go](https://github.com/nezhahq/agent/blob/c2b65ab6fa8926f3c7ed4ef3a0065fe003410237/cmd/agent/mcp_handlers.go)，以及 Dashboard [v2.6.1/mcp_capability.go](https://github.com/nezhahq/nezha/blob/v2.6.1/controller/mcp_capability.go)。后续上游变更不自动改变本契约。
 

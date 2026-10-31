@@ -616,10 +616,10 @@ class MainViewModel(
     /**
      * 切换远程 Shell 执行开关。
      *
-     * 此开关与 Root/Shizuku 模式完全独立，同时控制静默命令和交互终端；
+     * 此开关与 Root/Shizuku 模式完全独立，同时控制静默命令、交互终端和 MCP Exec；
      * Root 模式只决定已授权 Shell 能否提权。
      *
-     * 持久化成功后立即通知运行中的服务重读授权，兑现界面上「关闭后新请求立即生效」的承诺。
+     * 持久化成功后立即通知运行中的服务重读授权：拒绝新请求并取消对应的活动 MCP 后端。
      */
     fun toggleRemoteCommand(enabled: Boolean) {
         persistOnIo(
@@ -634,9 +634,10 @@ class MainViewModel(
     }
 
     /**
-     * 切换远程文件管理开关（TaskType 11）。
+     * 切换远程文件管理开关（TaskType 11 和 MCP FsList/FsRead）。
      *
      * 本应用持有「所有文件访问」权限，开启后面板可读写设备上几乎全部文件。
+     * 关闭后拒绝新请求并取消活动 MCP 文件后端。
      */
     fun toggleRemoteFileManager(enabled: Boolean) {
         persistOnIo(
