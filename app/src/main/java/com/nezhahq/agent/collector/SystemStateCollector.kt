@@ -88,7 +88,7 @@ class SystemStateCollector(
         collectState(isRootMode)
     }
 
-    private fun collectState(isRootMode: Boolean): State {
+    private suspend fun collectState(isRootMode: Boolean): State {
         // One framed transaction keeps all Shizuku-backed values from the same sampling tick and
         // avoids repeatedly crossing Binder for six tiny shell commands.
         val privilegedMetrics = if (isRootMode) readPrivilegedMetrics() else null
