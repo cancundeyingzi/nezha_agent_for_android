@@ -11,35 +11,15 @@ import android.os.SystemClock
 import com.nezhahq.agent.util.Logger
 import com.nezhahq.agent.util.RootShell
 import com.nezhahq.agent.util.shellEscape
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 
 private const val DUMPSYS_THROTTLE_MS = 5_000L
 private const val PRIVILEGED_UNAVAILABLE_RETRY_MS = 30_000L
 
-/**
- * GPU 数据采集器（独立模块，单一职责）。
- *
- * ## 职责划分
- * - **静态信息**：GPU 型号名称（通过 EGL14 + GLES20 获取，无需权限）
- * - **动态状态**：GPU 使用率百分比（通过 sysfs / dumpsys 获取，需 Root/Shizuku）
- *
- * ## 五级回退策略
- * | 优先级 | 方案 | 说明 |
- * |-------|------|------|
- * | P0    | sysfs 直读 | 仅 Android 9 以下或已手动 chmod 过的节点 |
- * | P1    | RootShell sysfs（已知厂商路径） | 核心主力，支持 Qualcomm/Mali/MediaTek |
- * | P1.5  | RootShell 动态扫描 /sys | 未知厂商兜底探测 |
- * | P2    | dumpsys gpu 解析 | 最终兜底，内部节流降频 |
- * | P3    | 返回空列表 | 设备不兼容 GPU 监控 |
- *
- * ## 线程安全
- * 所有缓存字段使用 @Volatile 保护，探测逻辑通过 synchronized 保证单次执行。
- *
- * ## 性能设计
- * - GPU 名称：首次调用时采集并永久缓存（硬件不变）
- * - sysfs 路径：首次采集时探测并缓存，后续直接读取
- * - P2 dumpsys：内部时间戳节流，5 秒内复用上次结果
- */
+/** GPU 使用率的采集方案，按探测优先级由高到低排列。 */
 internal enum class GpuCollectionStrategy {
     DIRECT,
     SHELL_FS,
@@ -59,37 +39,41 @@ internal class GpuModeStrategyCache(
     private val monotonicTimeMs: () -> Long = { System.nanoTime() / 1_000_000L },
     private val privilegedUnavailableRetryMs: Long = PRIVILEGED_UNAVAILABLE_RETRY_MS
 ) {
+    /**
+     * A `Mutex`, not `synchronized`: the dumpsys fallback now runs on its own process through a
+     * suspending call, and that call happens inside this critical section.
+     *
+     * The mutex is not reentrant, so nothing invoked from inside [collect] may call back into a
+     * locking method of this class — that would deadlock against the lock the caller already
+     * holds. This is why [collect] lets `readCached` report a dead strategy by returning null
+     * instead of exposing a `clear` method for it to call.
+     */
+    private val lock = Mutex()
     private var normalStrategy: GpuCollectionStrategy? = null
     private var privilegedStrategy: GpuCollectionStrategy? = null
     private var privilegedUnavailableAtMs: Long? = null
 
-    fun collect(
+    /**
+     * @param readCached reads through the already chosen strategy; returning null means that
+     *   strategy stopped working, which drops it so the next call probes again.
+     */
+    suspend fun collect(
         isPrivileged: Boolean,
-        readCached: (GpuCollectionStrategy) -> List<Double>,
-        probe: () -> GpuProbeResult
-    ): List<Double> = synchronized(this) {
+        readCached: suspend (GpuCollectionStrategy) -> List<Double>?,
+        probe: suspend () -> GpuProbeResult
+    ): List<Double> = lock.withLock {
         val strategy = strategyFor(isPrivileged)
         if (strategy == null || shouldRetryUnavailable(isPrivileged, strategy)) {
-            return@synchronized probe().also { result ->
+            return@withLock probe().also { result ->
                 cacheProbeResult(isPrivileged, result.strategy)
             }.usages
         }
-        readCached(strategy)
-    }
 
-    fun current(isPrivileged: Boolean): GpuCollectionStrategy? = synchronized(this) {
-        strategyFor(isPrivileged)
-    }
-
-    fun clear(isPrivileged: Boolean) = synchronized(this) {
-        setStrategy(isPrivileged, null)
-        if (isPrivileged) privilegedUnavailableAtMs = null
-    }
-
-    fun clearAll() = synchronized(this) {
-        normalStrategy = null
-        privilegedStrategy = null
-        privilegedUnavailableAtMs = null
+        readCached(strategy) ?: run {
+            setStrategy(isPrivileged, null)
+            if (isPrivileged) privilegedUnavailableAtMs = null
+            emptyList()
+        }
     }
 
     private fun strategyFor(isPrivileged: Boolean): GpuCollectionStrategy? {
@@ -139,19 +123,21 @@ internal class GpuDumpsysThrottle(
     private val monotonicTimeMs: () -> Long,
     private val throttleMs: Long = DUMPSYS_THROTTLE_MS
 ) {
+    /** A `Mutex` rather than `synchronized` because the reader it guards is a suspending call. */
+    private val lock = Mutex()
     private var lastSampleAtMs: Long? = null
     private var lastResult: Double? = null
 
-    fun recordInitial(result: Double) = synchronized(this) {
+    suspend fun recordInitial(result: Double) = lock.withLock {
         lastSampleAtMs = monotonicTimeMs()
         lastResult = result
     }
 
-    fun read(reader: () -> Double?): Double? = synchronized(this) {
+    suspend fun read(reader: suspend () -> Double?): Double? = lock.withLock {
         val now = monotonicTimeMs()
         val sampledAt = lastSampleAtMs
         if (sampledAt != null && now >= sampledAt && now - sampledAt < throttleMs) {
-            return@synchronized lastResult
+            return@withLock lastResult
         }
 
         reader().also { result ->
@@ -159,26 +145,46 @@ internal class GpuDumpsysThrottle(
             lastResult = result
         }
     }
-
-    fun reset() = synchronized(this) {
-        lastSampleAtMs = null
-        lastResult = null
-    }
 }
 
+/**
+ * GPU 数据采集器（独立模块，单一职责）。
+ *
+ * ## 职责划分
+ * - **静态信息**：GPU 型号名称（通过 EGL14 + GLES20 获取，无需权限）
+ * - **动态状态**：GPU 使用率百分比（通过 sysfs / dumpsys 获取，需 Root/Shizuku）
+ *
+ * ## 五级回退策略
+ * | 优先级 | 方案 | 说明 |
+ * |-------|------|------|
+ * | P0    | sysfs 直读 | 仅 Android 9 及以下（API ≤ 28）或已手动 chmod 过的节点 |
+ * | P1    | RootShell sysfs（已知厂商路径） | 核心主力，支持 Qualcomm/Mali/MediaTek |
+ * | P1.5  | RootShell 动态扫描 /sys | 未知厂商兜底探测 |
+ * | P2    | dumpsys 解析 | 最终兜底，命令慢且跑在独立进程上 |
+ * | P3    | 返回空列表 | 设备不兼容 GPU 监控 |
+ *
+ * ## 线程安全
+ * 缓存字段使用 @Volatile 保证可见性；策略选择与 dumpsys 节流各自持有一把 Mutex
+ * （而非 synchronized，因为临界区内含挂起调用），保证探测只跑一次。
+ *
+ * ## 性能设计
+ * - GPU 名称：首次调用时采集并永久缓存（硬件不变）
+ * - sysfs 路径：首次采集时探测并缓存，后续直接读取
+ * - P2 dumpsys：**采样周期不变**（调用方仍是每 2 秒调用一次），只是内部按时间戳节流——
+ *   5 秒内的重复调用直接复用上次结果、不再执行 dumpsys，所以面板上这一项的实际刷新
+ *   间隔是 5 秒。采集器本身不会、也无法要求调用方降低调用频率。
+ * - P2 的两条 dumpsys 命令走 [RootShell.executeIsolated]（独立进程），不占用全进程
+ *   共用的持久 Shell 会话锁：它们是整条采集链上最慢的命令，压在共享会话上会连带拖慢
+ *   同一拍里的其它指标命令和 FileManager 的文件操作，进而可能超出面板的状态回执预算。
+ */
 class GpuCollector internal constructor(
     monotonicTimeMs: () -> Long = { SystemClock.elapsedRealtime() },
     privilegedUnavailableRetryMs: Long = PRIVILEGED_UNAVAILABLE_RETRY_MS
 ) {
 
-    // ══════════════════════════════════════════════════════════════════════════
-    // 常量
-    // ══════════════════════════════════════════════════════════════════════════
-
     /**
-     * 已知 GPU 厂商路径数据库。
+     * 已知 GPU 厂商路径数据库的一条记录。
      *
-     * 每个条目包含：
      * - vendorHint: GL_VENDOR 中的关键词（用于优先匹配对应厂商路径，减少无效探测）
      * - path: sysfs 文件绝对路径
      * - parser: 原始文本 → [0.0, 100.0] 的解析函数
@@ -188,67 +194,6 @@ class GpuCollector internal constructor(
         val path: String,
         val parser: (String) -> Double?
     )
-
-    /** 已知厂商 sysfs 路径数据库（按优先级排列） */
-    private val KNOWN_SYSFS_ENTRIES = listOf(
-        // ── Qualcomm Adreno ──────────────────────────────────────────────
-        // gpu_busy_percentage 格式："xx %" → 直接取第一个数字
-        SysfsEntry("qualcomm", "/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage") { raw ->
-            raw.trim().split(WHITESPACE_RE).firstOrNull()?.toDoubleOrNull()
-        },
-        // gpubusy 格式："busy_ticks total_ticks" → busy/total * 100
-        SysfsEntry("qualcomm", "/sys/class/kgsl/kgsl-3d0/gpubusy") { raw ->
-            val parts = raw.trim().split(WHITESPACE_RE)
-            if (parts.size >= 2) {
-                val busy = parts[0].toLongOrNull() ?: return@SysfsEntry null
-                val total = parts[1].toLongOrNull() ?: return@SysfsEntry null
-                if (total > 0) (busy.toDouble() / total.toDouble() * 100.0) else null
-            } else null
-        },
-
-        // ── ARM Mali (Samsung Exynos / Google Tensor / Huawei) ────────────
-        // utilization 格式：整数 0~256 → (value / 256) * 100
-        SysfsEntry("arm", "/sys/class/misc/mali0/device/utilization") { raw ->
-            val value = raw.trim().toIntOrNull() ?: return@SysfsEntry null
-            (value.toDouble() / 256.0 * 100.0).coerceIn(0.0, 100.0)
-        },
-
-        // ── MediaTek 天玑（使用 Mali GPU 但路径不同）──────────────────────
-        // gpu_loading 格式：整数 0~100 → 直接使用
-        SysfsEntry("mediatek", "/sys/module/ged/parameters/gpu_loading") { raw ->
-            raw.trim().toDoubleOrNull()?.coerceIn(0.0, 100.0)
-        },
-        // 备选路径（部分联发科内核版本）
-        SysfsEntry("mediatek", "/sys/kernel/ged/hal/gpu_utilization") { raw ->
-            raw.trim().toDoubleOrNull()?.coerceIn(0.0, 100.0)
-        },
-
-        // ── Imagination PowerVR / IMG（市占极低，路径不统一）─────────────
-        SysfsEntry("imagination", "/sys/kernel/debug/pvr/status") { raw ->
-            // PowerVR 的 debug 节点格式因驱动版本而异，尝试匹配百分比
-            PERCENT_RE.find(raw)?.groupValues?.get(1)?.toDoubleOrNull()
-        }
-    )
-
-    // ══════════════════════════════════════════════════════════════════════════
-    // 预编译正则常量
-    // ══════════════════════════════════════════════════════════════════════════
-
-    /** 空白分割正则 */
-    private val WHITESPACE_RE = Regex("\\s+")
-
-    /** dumpsys 输出中 GPU 利用率字段的匹配正则 */
-    private val DUMPSYS_UTIL_RE = Regex(
-        """(?:GPU\s*(?:Total\s*)?Utilization|gpu[_\s]*load(?:ing)?|Load)\s*[:=]\s*(\d+)""",
-        RegexOption.IGNORE_CASE
-    )
-
-    /** 通用百分比匹配正则 */
-    private val PERCENT_RE = Regex("""(\d+(?:\.\d+)?)\s*%""")
-
-    // ══════════════════════════════════════════════════════════════════════════
-    // 策略枚举
-    // ══════════════════════════════════════════════════════════════════════════
 
     // ══════════════════════════════════════════════════════════════════════════
     // 缓存字段（@Volatile 保证多线程可见性）
@@ -298,10 +243,10 @@ class GpuCollector internal constructor(
             // 双重检查锁
             cachedGpuName?.let { return listOf(it) }
 
-            val gpuInfo = queryGpuInfoViaEgl()
-            cachedGpuName = gpuInfo?.first ?: return emptyList()
-            cachedGpuVendor = gpuInfo.second
-            return listOf(cachedGpuName!!)
+            val (renderer, vendor) = queryGpuInfoViaEgl() ?: return emptyList()
+            cachedGpuName = renderer
+            cachedGpuVendor = vendor
+            return listOf(renderer)
         }
     }
 
@@ -318,63 +263,26 @@ class GpuCollector internal constructor(
      * @param isRootMode 是否处于 Root/Shizuku 提权模式
      * @return GPU 使用率列表，不可用时返回空列表
      */
-    fun getGpuUsages(isRootMode: Boolean): List<Double> {
+    suspend fun getGpuUsages(isRootMode: Boolean): List<Double> {
         val state = stateFor(isRootMode)
         return strategyCache.collect(
             isPrivileged = isRootMode,
-            readCached = { strategy -> readUsing(strategy, state, isRootMode) },
+            readCached = { strategy -> readUsing(strategy, state) },
             probe = { probeAndRead(isRootMode, state) }
         )
     }
 
-    private fun readUsing(
+    /** @return null 表示该策略已失效，交由 [GpuModeStrategyCache] 丢弃缓存并重新探测。 */
+    private suspend fun readUsing(
         strategy: GpuCollectionStrategy,
-        state: ModeState,
-        isPrivileged: Boolean
-    ): List<Double> {
+        state: ModeState
+    ): List<Double>? {
         return when (strategy) {
-            GpuCollectionStrategy.DIRECT -> readDirect(state, isPrivileged)
+            GpuCollectionStrategy.DIRECT -> readDirect(state)
             GpuCollectionStrategy.SHELL_FS -> readShellFs(state)
             GpuCollectionStrategy.DUMPSYS -> readDumpsys(state)
             GpuCollectionStrategy.UNAVAILABLE -> emptyList()
         }
-    }
-
-    /**
-     * 获取当前策略推荐的采样间隔（毫秒）。
-     *
-     * - P0/P1: 2000ms（与 CPU 等指标同频）
-     * - P2:    5000ms（降频，减少 dumpsys 开销）
-     * - P3:    Long.MAX_VALUE（不采集）
-     */
-    fun getRecommendedIntervalMs(isRootMode: Boolean): Long = when (
-        strategyCache.current(isRootMode)
-    ) {
-        GpuCollectionStrategy.DIRECT, GpuCollectionStrategy.SHELL_FS -> 2000L
-        GpuCollectionStrategy.DUMPSYS -> DUMPSYS_THROTTLE_MS
-        GpuCollectionStrategy.UNAVAILABLE, null -> Long.MAX_VALUE
-    }
-
-    /**
-     * 清理所有缓存，强制下次调用时重新探测。
-     *
-     * 仅影响当前实例，可用于要求立即重新探测的显式恢复流程。
-     */
-    fun resetCache() {
-        // 型号名称不清理（硬件不变），仅清理路径和策略缓存
-        resetModeState(normalState)
-        resetModeState(privilegedState)
-        strategyCache.clearAll()
-        Logger.i("GpuCollector: 缓存已重置")
-    }
-
-    private fun resetModeState(state: ModeState) {
-        state.sysfsPath = null
-        state.parser = null
-        state.directReadFailed = false
-        state.probeCompleted = false
-        state.unavailableWarned = false
-        state.dumpsysThrottle.reset()
     }
 
     private fun stateFor(isPrivileged: Boolean): ModeState {
@@ -424,8 +332,10 @@ class GpuCollector internal constructor(
             )
             val configs = arrayOfNulls<EGLConfig>(1)
             val numConfigs = IntArray(1)
-            if (!EGL14.eglChooseConfig(display, configAttribs, 0, configs, 0, 1, numConfigs, 0)
-                || numConfigs[0] == 0 || configs[0] == null) {
+            val chosen = EGL14.eglChooseConfig(display, configAttribs, 0, configs, 0, 1, numConfigs, 0)
+            // 三个条件都满足才算拿到配置；收进局部变量后后续两处直接使用，无需 !!
+            val config = configs[0]?.takeIf { chosen && numConfigs[0] > 0 }
+            if (config == null) {
                 Logger.i("GpuCollector: EGL 配置选择失败")
                 return null
             }
@@ -436,7 +346,7 @@ class GpuCollector internal constructor(
                 EGL14.EGL_HEIGHT, 1,
                 EGL14.EGL_NONE
             )
-            surface = EGL14.eglCreatePbufferSurface(display, configs[0]!!, surfaceAttribs, 0)
+            surface = EGL14.eglCreatePbufferSurface(display, config, surfaceAttribs, 0)
             if (surface == EGL14.EGL_NO_SURFACE) {
                 Logger.i("GpuCollector: EGL pbuffer surface 创建失败")
                 return null
@@ -447,7 +357,7 @@ class GpuCollector internal constructor(
                 EGL14.EGL_CONTEXT_CLIENT_VERSION, 2,
                 EGL14.EGL_NONE
             )
-            context = EGL14.eglCreateContext(display, configs[0]!!, EGL14.EGL_NO_CONTEXT, contextAttribs, 0)
+            context = EGL14.eglCreateContext(display, config, EGL14.EGL_NO_CONTEXT, contextAttribs, 0)
             if (context == EGL14.EGL_NO_CONTEXT) {
                 Logger.i("GpuCollector: EGL 上下文创建失败")
                 return null
@@ -496,24 +406,24 @@ class GpuCollector internal constructor(
      * @param isRootMode 是否处于 Root/Shizuku 提权模式
      * @return 本次探测的 GPU 使用率列表
      */
-    private fun probeAndRead(isRootMode: Boolean, state: ModeState): GpuProbeResult {
+    private suspend fun probeAndRead(isRootMode: Boolean, state: ModeState): GpuProbeResult {
         // A privileged negative-cache retry must repeat dynamic discovery as well as known paths.
         if (isRootMode && state.probeCompleted) {
             state.probeCompleted = false
         }
 
         // ── P0: Direct sysfs 直读（极速通道）──────────────────────────────
-        // 仅在 Android 9 以下（SELinux untrusted_app 限制较松）时尝试
-        if (!state.directReadFailed && Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
-            val result = probeDirectRead(state)
-            if (result != null) {
-                Logger.i("GpuCollector: P0 直读成功 (路径=${state.sysfsPath})")
-                return GpuProbeResult(GpuCollectionStrategy.DIRECT, listOf(result))
+        // 仅在 Android 9 及以下（API ≤ 28，SELinux 对 untrusted_app 的限制还较松）时尝试；
+        // Android 10+ 必然被拒，连一次探测都不必付出。
+        // 两个分支最终都要置 directReadFailed：无论是版本不满足还是本次读失败，P0 都不再重试。
+        if (!state.directReadFailed) {
+            if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
+                val result = probeDirectRead(state)
+                if (result != null) {
+                    Logger.i("GpuCollector: P0 直读成功 (路径=${state.sysfsPath})")
+                    return GpuProbeResult(GpuCollectionStrategy.DIRECT, listOf(result))
+                }
             }
-            // P0 失败，标记后永久跳过
-            state.directReadFailed = true
-        } else if (!state.directReadFailed) {
-            // Android 9+，直接标记跳过 P0
             state.directReadFailed = true
         }
 
@@ -564,7 +474,8 @@ class GpuCollector internal constructor(
     /**
      * P0: 尝试以普通 App 权限直接读取 sysfs GPU 节点。
      *
-     * 仅在 Android 9 以下有效（SELinux 对 untrusted_app 限制较松）。
+     * 实际只在 Android 9 及以下（API ≤ 28）被调用，见 [probeAndRead] 的版本判断；
+     * 那之前 SELinux 对 untrusted_app 的限制还较松。
      * 遍历已知路径，首个 canRead() 且解析成功的路径即为命中。
      *
      * @return 解析出的 GPU 使用率，所有路径均不可读返回 null
@@ -591,9 +502,12 @@ class GpuCollector internal constructor(
 
     /**
      * 使用缓存的 P0 策略直接读取 sysfs。
-     * 读取失败时自动降级（清除缓存，下次重新探测）。
+     *
+     * @return 读取失败时返回 null，表示该策略已失效、需要清掉缓存重新探测。
+     *   之所以用返回值上报而不是反过来去调用 [GpuModeStrategyCache] 上的方法作废缓存：
+     *   本函数正跑在它的锁里，而那把 Mutex 不可重入，回调会把自己锁死。
      */
-    private fun readDirect(state: ModeState, isPrivileged: Boolean): List<Double> {
+    private fun readDirect(state: ModeState): List<Double>? {
         val path = state.sysfsPath ?: return emptyList()
         val parser = state.parser ?: return emptyList()
         return try {
@@ -603,9 +517,8 @@ class GpuCollector internal constructor(
         } catch (_: Exception) {
             // 权限可能在系统更新后被收紧，降级处理
             Logger.i("GpuCollector: P0 直读失败，清除缓存以便重新探测")
-            strategyCache.clear(isPrivileged)
             state.directReadFailed = true
-            emptyList()
+            null
         }
     }
 
@@ -775,13 +688,13 @@ class GpuCollector internal constructor(
      * 距上次调用不足 5 秒时直接返回上次的缓存值，
      * 避免高频 dumpsys 调用（单次耗时 50~200ms）。
      */
-    private fun readDumpsys(state: ModeState): List<Double> {
-        val result = state.dumpsysThrottle.read(::readDumpsysInternal)
+    private suspend fun readDumpsys(state: ModeState): List<Double> {
+        val result = state.dumpsysThrottle.read { readDumpsysInternal() }
         return result?.let { listOf(it) } ?: emptyList()
     }
 
     /**
-     * P2 内部实现：执行 dumpsys gpu 并解析利用率字段。
+     * P2 内部实现：执行 dumpsys 并解析利用率字段。
      *
      * 尝试匹配常见格式：
      * - "GPU Utilization: 15%"
@@ -789,12 +702,18 @@ class GpuCollector internal constructor(
      * - "Load: 15%"
      * - "gpu_loading: 15"
      *
+     * 用 [RootShell.executeIsolated] 而不是共享持久会话：dumpsys 是本采集链上最慢的命令，
+     * 而那个会话是全进程唯一的——指标循环每 2 秒已经要在它上面串行跑近十条命令，还要和
+     * FileManager 的 ls/stat 抢同一把锁。把慢命令压在上面，累计耗时可能突破面板的状态回执
+     * 预算，看门狗会据此判定连接已死。独立进程要多付一次 su 启动开销，但这条路本就被节流到
+     * 最多 5 秒一次，且只在 sysfs 全部失败的设备上才会走到。
+     *
      * @return 解析出的 GPU 使用率，解析失败返回 null
      */
-    private fun readDumpsysInternal(): Double? {
+    private suspend fun readDumpsysInternal(): Double? {
         try {
             // 尝试 dumpsys gpu
-            val gpuOutput = RootShell.execute("dumpsys gpu 2>/dev/null")
+            val gpuOutput = RootShell.executeIsolated("dumpsys gpu 2>/dev/null")
             if (gpuOutput.isNotBlank()) {
                 val match = DUMPSYS_UTIL_RE.find(gpuOutput)
                 if (match != null) {
@@ -802,13 +721,21 @@ class GpuCollector internal constructor(
                     if (value != null) return value.coerceIn(0.0, 100.0)
                 }
             }
+        } catch (cancellation: CancellationException) {
+            // 改用 executeIsolated 之后这里才会收到取消：它是 suspend 的，而
+            // CancellationException 是 Exception 的子类，被下面的兜底吞掉会让协程取消失效——
+            // 白跑一次 SurfaceFlinger，还会把 null 连同新时间戳写进节流缓存，
+            // 使重连后 5 秒内 GPU 一律上报空。
+            throw cancellation
         } catch (_: Exception) {
             // dumpsys 不可用
         }
 
         try {
             // 备选: dumpsys SurfaceFlinger 中的 GPU 相关字段
-            val sfOutput = RootShell.execute("dumpsys SurfaceFlinger --latency 2>/dev/null | head -20")
+            val sfOutput = RootShell.executeIsolated(
+                "dumpsys SurfaceFlinger --latency 2>/dev/null | head -20"
+            )
             if (sfOutput.isNotBlank()) {
                 // SurfaceFlinger 的 latency 输出较间接，仅作最终尝试
                 val match = DUMPSYS_UTIL_RE.find(sfOutput)
@@ -817,10 +744,72 @@ class GpuCollector internal constructor(
                     if (value != null) return value.coerceIn(0.0, 100.0)
                 }
             }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
         } catch (_: Exception) {
             // SurfaceFlinger 不可用
         }
 
         return null
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // 进程级共享常量：正则与路径表都与实例状态无关，放在伴生对象里只编译/分配一次，
+    // 而不是每 new 一个采集器就重建一遍。
+    // ══════════════════════════════════════════════════════════════════════════
+
+    private companion object {
+        /** 空白分割正则 */
+        val WHITESPACE_RE = Regex("\\s+")
+
+        /** dumpsys 输出中 GPU 利用率字段的匹配正则 */
+        val DUMPSYS_UTIL_RE = Regex(
+            """(?:GPU\s*(?:Total\s*)?Utilization|gpu[_\s]*load(?:ing)?|Load)\s*[:=]\s*(\d+)""",
+            RegexOption.IGNORE_CASE
+        )
+
+        /** 通用百分比匹配正则 */
+        val PERCENT_RE = Regex("""(\d+(?:\.\d+)?)\s*%""")
+
+        /** 已知厂商 sysfs 路径数据库（按优先级排列） */
+        val KNOWN_SYSFS_ENTRIES = listOf(
+            // ── Qualcomm Adreno ──────────────────────────────────────────────
+            // gpu_busy_percentage 格式："xx %" → 直接取第一个数字
+            SysfsEntry("qualcomm", "/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage") { raw ->
+                raw.trim().split(WHITESPACE_RE).firstOrNull()?.toDoubleOrNull()
+            },
+            // gpubusy 格式："busy_ticks total_ticks" → busy/total * 100
+            SysfsEntry("qualcomm", "/sys/class/kgsl/kgsl-3d0/gpubusy") { raw ->
+                val parts = raw.trim().split(WHITESPACE_RE)
+                if (parts.size >= 2) {
+                    val busy = parts[0].toLongOrNull() ?: return@SysfsEntry null
+                    val total = parts[1].toLongOrNull() ?: return@SysfsEntry null
+                    if (total > 0) (busy.toDouble() / total.toDouble() * 100.0) else null
+                } else null
+            },
+
+            // ── ARM Mali (Samsung Exynos / Google Tensor / Huawei) ────────────
+            // utilization 格式：整数 0~256 → (value / 256) * 100
+            SysfsEntry("arm", "/sys/class/misc/mali0/device/utilization") { raw ->
+                val value = raw.trim().toIntOrNull() ?: return@SysfsEntry null
+                (value.toDouble() / 256.0 * 100.0).coerceIn(0.0, 100.0)
+            },
+
+            // ── MediaTek 天玑（使用 Mali GPU 但路径不同）──────────────────────
+            // gpu_loading 格式：整数 0~100 → 直接使用
+            SysfsEntry("mediatek", "/sys/module/ged/parameters/gpu_loading") { raw ->
+                raw.trim().toDoubleOrNull()?.coerceIn(0.0, 100.0)
+            },
+            // 备选路径（部分联发科内核版本）
+            SysfsEntry("mediatek", "/sys/kernel/ged/hal/gpu_utilization") { raw ->
+                raw.trim().toDoubleOrNull()?.coerceIn(0.0, 100.0)
+            },
+
+            // ── Imagination PowerVR / IMG（市占极低，路径不统一）─────────────
+            SysfsEntry("imagination", "/sys/kernel/debug/pvr/status") { raw ->
+                // PowerVR 的 debug 节点格式因驱动版本而异，尝试匹配百分比
+                PERCENT_RE.find(raw)?.groupValues?.get(1)?.toDoubleOrNull()
+            }
+        )
     }
 }

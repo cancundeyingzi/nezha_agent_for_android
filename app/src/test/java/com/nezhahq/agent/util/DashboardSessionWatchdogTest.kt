@@ -1,4 +1,4 @@
-package com.nezhahq.agent.service
+package com.nezhahq.agent.util
 
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -14,9 +14,24 @@ class DashboardSessionWatchdogTest {
     fun officialTimeoutDefaultsArePreserved() {
         assertEquals(5_000L, DashboardSessionWatchdog.HANDSHAKE_TIMEOUT_MS)
         assertEquals(10_000L, DashboardSessionWatchdog.STATE_RECEIPT_TIMEOUT_MS)
-        assertEquals(30_000L, DashboardSessionWatchdog.TASK_IDLE_TIMEOUT_MS)
-        assertEquals(5_000L, DashboardSessionWatchdog.RECONNECT_BACKOFF_MS)
+        assertEquals(300_000L, DashboardSessionWatchdog.TASK_IDLE_TIMEOUT_MS)
         assertEquals(2_000L, DashboardSessionWatchdog.STATE_REPORT_INTERVAL_MS)
+    }
+
+    /**
+     * The task stream must never be the tighter deadline of the two.
+     *
+     * The state stream is the connection's liveness detector; the task-stream deadline only exists
+     * to replace a stream the Dashboard has stopped serving. If they ever crossed, an idle task
+     * stream would start deciding when sessions are rebuilt, which is the failure these two values
+     * were re-chosen to prevent.
+     */
+    @Test
+    fun theIdleTaskStreamOutlivesTheStateReceiptDeadlineByAWideMargin() {
+        assertTrue(
+            DashboardSessionWatchdog.TASK_IDLE_TIMEOUT_MS >
+                DashboardSessionWatchdog.STATE_RECEIPT_TIMEOUT_MS * 10
+        )
     }
 
     @Test

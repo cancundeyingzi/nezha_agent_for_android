@@ -134,10 +134,6 @@ internal object ConfigStore {
         it.getBoolean("enable_remote_nat", false)
     }
 
-    fun hasSimulatorConfig(context: Context): Boolean = read(context, false) {
-        it.contains("simulator_server")
-    }
-
     fun getSimulatorServer(context: Context): String = read(context, "") { prefs ->
         if (prefs.contains("simulator_server")) {
             prefs.getString("simulator_server", "") ?: ""
@@ -180,10 +176,6 @@ internal object ConfigStore {
         it.putBoolean("enable_auto_start", enable)
     }
 
-    fun setHasShownAutoStartPrompt(context: Context, shown: Boolean): Boolean = commit(context) {
-        it.putBoolean("has_shown_auto_start_prompt", shown)
-    }
-
     fun saveSimulatorConfig(
         context: Context,
         server: String,
@@ -202,18 +194,6 @@ internal object ConfigStore {
         )
     }
 
-    fun setEnableFloatWindow(context: Context, enable: Boolean): Boolean = commit(context) {
-        it.putBoolean("enable_float_window", enable)
-    }
-
-    fun setEnableKeepAliveAudio(context: Context, enable: Boolean): Boolean = commit(context) {
-        it.putBoolean("enable_keep_alive_audio", enable)
-    }
-
-    fun setEnableVpnTraffic(context: Context, enable: Boolean): Boolean = commit(context) {
-        it.putBoolean("enable_vpn_traffic", enable)
-    }
-
     fun setEnableRemoteCommand(context: Context, enable: Boolean): Boolean = commit(context) {
         it.putBoolean("enable_remote_command", enable)
     }
@@ -225,13 +205,6 @@ internal object ConfigStore {
     fun setEnableRemoteNat(context: Context, enable: Boolean): Boolean = commit(context) {
         it.putBoolean("enable_remote_nat", enable)
     }
-
-    fun setRootMode(context: Context, enable: Boolean): Boolean =
-        rootModeMutations.persistAndApply(enable) {
-            commit(context) {
-                it.putBoolean("root_mode", enable)
-            }
-        }
 
     fun saveToolSettings(
         context: Context,

@@ -18,19 +18,21 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import org.json.JSONObject
 import proto.Nezha.Task
 import proto.Nezha.TaskResult
 import java.io.Closeable
-import java.io.IOException
-import java.io.InputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.security.SecureRandom
+import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLHandshakeException
+import javax.net.ssl.SSLPeerUnverifiedException
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 import kotlin.coroutines.resume
@@ -263,9 +265,11 @@ private fun hasReachedDeadline(nowNanos: Long, deadlineNanos: Long): Boolean =
  * - **TaskType 4 (Command)**：远程命令执行（带 2 小时超时保护）
  *
  * ## 安全说明
- * - HTTPGet 使用信任所有证书的 OkHttpClient，用于监控自签名 HTTPS 站点
+ * - HTTPGet 默认校验证书；只有失败原因确实出在证书上时才降级为不校验重试，
+ *   并在回报给面板的结果里标注 [INSECURE_MARKER]
  * - Command 与交互终端共用远程 Shell 授权，默认禁用
  * - Command 执行设有 2 小时硬超时，防止死循环脚本阻塞协程
+ * - 异常只记 TaskID 与异常类名：命令与 URL 常带凭据，日志窗和 logcat 都可读
  */
 object TaskExecutor {
 
@@ -293,10 +297,16 @@ object TaskExecutor {
     }
 
     // ──────────────────────────────────────────────────────────────────────────
-    // OkHttpClient：信任所有证书（监控场景需要能连接自签名 HTTPS 站点）
+    // OkHttpClient：默认校验证书，仅在证书本身出问题时降级重试
     // ──────────────────────────────────────────────────────────────────────────
 
-    /** 信任所有证书的 TrustManager，用于监控自签名 HTTPS 站点 */
+    /** 回报给面板的"这条结果采自未校验连接"标记，见 [certificateData]。 */
+    private const val INSECURE_MARKER = "insecure=true"
+
+    /** 遍历异常 cause 链的深度上限，防止野外出现的自引用异常链把线程转死。 */
+    private const val MAX_CAUSE_DEPTH = 16
+
+    /** 信任所有证书的 TrustManager，**仅**供 [insecureMonitoringClient] 使用 */
     private val trustAllManager = object : X509TrustManager {
         override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
         override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
@@ -304,23 +314,31 @@ object TaskExecutor {
     }
 
     /**
-     * 仅供 HTTPGet 健康检查使用的 OkHttpClient。
+     * HTTPGet 健康检查的默认客户端：按系统信任库正常校验证书链与主机名。
+     * 10 秒连接/读取超时。
+     */
+    private val monitoringClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(10, TimeUnit.SECONDS)
+        .build()
+
+    /**
+     * 证书校验失败后的降级客户端：既不校验证书链，也不校验主机名。
      *
-     * - 信任所有 SSL 证书（对齐官方探针行为，监控场景需要）
-     * - 禁用主机名验证（允许 IP 直连和自签名证书）
-     * - 10 秒连接/读取超时
+     * 由 [monitoringClient] 的 `newBuilder()` 派生，因此连接池、Dispatcher 与超时都是同一份，
+     * 不会因为多一个客户端而多一套线程和连接。两者的 OkHttp Address 不同
+     * （sslSocketFactory / hostnameVerifier 不同），所以降级建立的连接不会被复用回校验路径。
      *
-     * **禁止复用**：它不校验服务端身份，任何携带凭据的请求用它发送都等同于明文暴露。
-     * 需要安全传输的场景请另建默认配置的 OkHttpClient。
+     * **禁止扩大使用范围**：它不校验服务端身份，任何携带凭据的请求用它发送都等同于明文暴露。
+     * 这里可以用，只因为它单纯给"证书已经不可信"的站点做可达性探测，且结果一定带
+     * [INSECURE_MARKER] 标注。需要安全传输的场景请使用 [monitoringClient]。
      */
     private val insecureMonitoringClient: OkHttpClient = run {
         val sslContext = SSLContext.getInstance("TLS")
         sslContext.init(null, arrayOf<TrustManager>(trustAllManager), SecureRandom())
-        OkHttpClient.Builder()
+        monitoringClient.newBuilder()
             .sslSocketFactory(sslContext.socketFactory, trustAllManager)
             .hostnameVerifier { _, _ -> true }
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(10, TimeUnit.SECONDS)
             .build()
     }
 
@@ -354,37 +372,21 @@ object TaskExecutor {
             when (task.type) {
                 // ── TaskType 1：HTTPGet 健康检查 + SSL 证书解析 ──────────────
                 TaskTypes.HTTP_GET -> {
-                    val params = parseParams(task.data)
-                    val url = params.host
-                    val start = System.currentTimeMillis()
-                    val request = Request.Builder().url(url).build()
+                    val request = Request.Builder().url(parseHost(task.data)).build()
+                    val probe = executeHttpProbe(request, task.id)
                     // 使用 .use {} 确保 Response 在异常时也能正确释放，
                     // 防止 OkHttp 连接池泄漏（原 response.close() 在异常路径下不会执行）
-                    insecureMonitoringClient.newCall(request).execute().use { response ->
-                        val delay = (System.currentTimeMillis() - start).toFloat()
-
-                        // 提取 SSL 证书信息（仅 HTTPS 连接有 handshake）
-                        // 官方 Go Agent 格式：result.Data = c.Issuer.CommonName + "|" + c.NotAfter.String()
-                        var certData = ""
-                        response.handshake?.peerCertificates?.firstOrNull()?.let { cert ->
-                            if (cert is X509Certificate) {
-                                val issuerCN = extractCN(cert.issuerX500Principal.name) ?: cert.issuerX500Principal.name
-                                // 使用与 Go time.Time.String() 一致的格式输出
-                                certData = "$issuerCN|${cert.notAfter}"
-                            }
-                        }
-
-                        resultBuilder.setDelay(delay)
+                    probe.response.use { response ->
+                        resultBuilder.setDelay(probe.delayMillis)
                             .setSuccessful(response.isSuccessful)
-                            .setData(certData)
+                            .setData(certificateData(response, probe.certificateUnverified))
                     }
                 }
 
                 // ── TaskType 2：ICMP Ping ────────────────────────────────────
                 TaskTypes.ICMP_PING -> {
-                    val params = parseParams(task.data)
                     val start = System.currentTimeMillis()
-                    val process = ProcessBuilder("ping", "-c", "1", "-w", "5", params.host).start()
+                    val process = ProcessBuilder("ping", "-c", "1", "-w", "5", parseHost(task.data)).start()
                     var exitedNormally = false
                     try {
                         // exitValue 轮询兼容 API 23；不调用 API 26 才提供的带超时 waitFor。
@@ -405,17 +407,29 @@ object TaskExecutor {
 
                 // ── TaskType 3：TCP Ping ─────────────────────────────────────
                 TaskTypes.TCP_PING -> {
-                    val params = parseParams(task.data)
-                    val start = System.currentTimeMillis()
-                    val socket = Socket()
-                    try {
-                        socket.connect(InetSocketAddress(params.host, params.port), 5000)
-                        val delay = (System.currentTimeMillis() - start).toFloat()
-                        resultBuilder.setDelay(delay).setSuccessful(true)
-                    } catch (e: Exception) {
-                        resultBuilder.setDelay(0f).setSuccessful(false)
-                    } finally {
-                        socket.close()
+                    when (val target = parseTcpTarget(task.data)) {
+                        is HostPort.Result.Invalid -> {
+                            // 只记 TaskID：目标串由面板下发，可能含内网主机名
+                            Logger.i("TaskExecutor: TCP Ping 目标无法解析 (TaskID=${task.id})")
+                            // 诊断回给面板，而不是静默用 port=0 去连一个必然失败的地址
+                            resultBuilder.setDelay(0f).setSuccessful(false).setData(target.reason)
+                        }
+
+                        is HostPort.Result.Parsed -> {
+                            val start = System.currentTimeMillis()
+                            val socket = Socket()
+                            try {
+                                socket.connect(InetSocketAddress(target.host, target.port), 5000)
+                                val delay = (System.currentTimeMillis() - start).toFloat()
+                                resultBuilder.setDelay(delay).setSuccessful(true)
+                            } catch (e: Exception) {
+                                if (e is CancellationException) throw e
+                                logTaskFailure("TCP Ping 连接失败", task.id, e)
+                                resultBuilder.setDelay(0f).setSuccessful(false)
+                            } finally {
+                                socket.close()
+                            }
+                        }
                     }
                 }
 
@@ -445,10 +459,22 @@ object TaskExecutor {
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (e: Exception) {
+            logTaskFailure("任务执行异常", task.id, e)
             resultBuilder.setSuccessful(false).setData(e.message ?: "Unknown error")
         }
 
         return@withContext resultBuilder.build()
+    }
+
+    /**
+     * 记录一次任务失败。
+     *
+     * 刻意**只**写 TaskID 与异常类名：面板下发的命令经常携带凭据，异常 message 里也常见
+     * 带 token 的 URL，而 App 内日志窗和 logcat 都可读。异常对象同样不传给 [Logger.e]
+     * ——它会把 `throwable.message` 拼进日志行。诊断细节只回给面板（它本来就知道自己下发了什么）。
+     */
+    private fun logTaskFailure(what: String, taskId: Long, failure: Throwable) {
+        Logger.i("TaskExecutor: $what (TaskID=$taskId, error=${failure.javaClass.simpleName})")
     }
 
     private fun shouldLogUnsupportedType(type: Long): Boolean {
@@ -523,9 +549,100 @@ object TaskExecutor {
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (e: Exception) {
+            // 这里的失败不会冒泡到 executeTask 的 catch，所以要自己记一条（同样只记 ID 和类名）
+            logTaskFailure("命令执行异常", resultBuilder.id, e)
             val delay = (System.currentTimeMillis() - startTime).toFloat()
             resultBuilder.setData(e.message ?: "Unknown error").setDelay(delay).setSuccessful(false)
         }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // HTTPGet 探测
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /** 一次 HTTPGet 探测的结果：响应、耗时，以及它是否来自不校验证书的降级重试。 */
+    private class HttpProbe(
+        val response: Response,
+        val certificateUnverified: Boolean,
+        val delayMillis: Float
+    )
+
+    /**
+     * 先用校验证书的 [monitoringClient] 探测；只有失败原因确实出在证书上时，
+     * 才用 [insecureMonitoringClient] 降级重试一次。
+     *
+     * ## 为什么不能一律不校验
+     * 探测结果会把证书 issuer 与到期时间回报给面板，而这份数据的用途正是发现
+     * "证书被换掉 / 快过期"。若它采自一条未校验的连接，存在中间人时可被任意伪造——
+     * 而中间人恰恰是它本该报警的场景。
+     *
+     * ## 为什么仍要降级
+     * 自签名证书的内网服务是这类探测的常见目标，直接失败会让它们从"可监控"变成"永远红"。
+     * 降级后的结果一定带 [INSECURE_MARKER]，由面板侧判断可信度。
+     */
+    private fun executeHttpProbe(request: Request, taskId: Long): HttpProbe {
+        val start = System.currentTimeMillis()
+        return try {
+            HttpProbe(
+                response = monitoringClient.newCall(request).execute(),
+                certificateUnverified = false,
+                delayMillis = elapsedMillisSince(start)
+            )
+        } catch (e: Exception) {
+            if (e is CancellationException || !isCertificateFailure(e)) throw e
+            logTaskFailure("HTTPGet 证书校验失败，降级为不校验重试", taskId, e)
+            // 重新计时：把失败的那次握手也算进延迟，会让被降级的站点在面板上凭空多出一倍延时
+            val retryStart = System.currentTimeMillis()
+            HttpProbe(
+                response = insecureMonitoringClient.newCall(request).execute(),
+                certificateUnverified = true,
+                delayMillis = elapsedMillisSince(retryStart)
+            )
+        }
+    }
+
+    private fun elapsedMillisSince(startMillis: Long): Float =
+        (System.currentTimeMillis() - startMillis).toFloat()
+
+    /**
+     * 失败是否出在证书本身。
+     *
+     * 只认握手 / 主机名 / 证书链三类，不认所有 `SSLException`：连接重置一类的传输错误
+     * 如果也触发降级，一次偶发失败就会把一个证书完全正常的站点标成 [INSECURE_MARKER]。
+     */
+    private fun isCertificateFailure(failure: Throwable): Boolean {
+        var cause: Throwable? = failure
+        var depth = 0
+        while (cause != null && depth < MAX_CAUSE_DEPTH) {
+            if (cause is SSLHandshakeException ||
+                cause is SSLPeerUnverifiedException ||
+                cause is CertificateException
+            ) {
+                return true
+            }
+            cause = cause.cause
+            depth++
+        }
+        return false
+    }
+
+    /**
+     * 组装回报给面板的证书数据。
+     *
+     * 格式沿用官方 Go Agent 的 `issuerCN|notAfter`（`c.Issuer.CommonName + "|" + c.NotAfter.String()`）。
+     * 面板按**第一个** `|` 切分，后半段必须仍是可解析的时间，所以"未校验"标记只能写进前半段的
+     * issuer 文本里——追加成第三段会让面板把 `notAfter|insecure=true` 当时间去解析而失败。
+     *
+     * 无 TLS 握手时保持空串（与既有行为一致）；理论上不会出现"降级成功却没有证书"，
+     * 但真出现时也要让标记可见，而不是悄悄回一个干净的空结果。
+     */
+    private fun certificateData(response: Response, certificateUnverified: Boolean): String {
+        val cert = response.handshake?.peerCertificates?.firstOrNull() as? X509Certificate
+            ?: return if (certificateUnverified) INSECURE_MARKER else ""
+        val issuerCN = extractCN(cert.issuerX500Principal.name) ?: cert.issuerX500Principal.name
+        val issuer = if (certificateUnverified) "$issuerCN [$INSECURE_MARKER]" else issuerCN
+        // 使用与 Go time.Time.String() 一致的格式输出
+        return "$issuer|${cert.notAfter}"
     }
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -555,28 +672,53 @@ object TaskExecutor {
     // 参数解析
     // ──────────────────────────────────────────────────────────────────────────
 
-    /** 任务参数数据类，包含目标主机和端口 */
-    private data class TaskParams(val host: String, val port: Int = 0)
+    /**
+     * TCP Ping 省略端口时使用的端口。
+     *
+     * 取 80 是为了与下面 JSON 分支历史上的 `optInt("port", 80)` 保持一致：同一个目标
+     * 写成 `{"host":"x"}` 还是写成 `x`，不应该连到不同端口。80 也是这类探测最常见的目标。
+     */
+    private const val DEFAULT_TCP_PING_PORT = 80
 
     /**
-     * 解析面板下发的任务数据。
+     * 解析 HTTPGet / ICMPPing 的目标主机。
+     *
+     * 支持两种格式：
+     * 1. JSON 格式：`{"host": "example.com"}`
+     * 2. 纯字符串格式：`"example.com"`（兼容旧版面板）
+     *
+     * 这里刻意**不**拆 `host:port`：HTTPGet 拿到的是完整 URL，`https://example.com` 里的
+     * 冒号不是端口分隔符，拆了会把 host 变成 `https`。需要端口的 TCP Ping 走 [parseTcpTarget]。
+     */
+    private fun parseHost(data: String): String = try {
+        JSONObject(data).optString("host", data)
+    } catch (_: Exception) {
+        data
+    }
+
+    /**
+     * 解析 TCP Ping 的目标。
      *
      * 支持两种格式：
      * 1. JSON 格式：`{"host": "example.com", "port": 80}`
-     * 2. 纯字符串格式：`"example.com"`（兼容旧版面板）
+     * 2. 纯字符串格式：`example.com:80` / `[::1]:8080` / `example.com`（兼容旧版面板）
      *
-     * @param data 面板下发的原始数据字符串
-     * @return 解析后的 TaskParams
+     * 纯字符串分支此前是 `TaskParams(host = data)`：host 变成整串 `example.com:80`、port 留 0，
+     * 连接必然失败——文档声称支持的格式其实一次都没通过。现在与 NAT 共用 [HostPort] 的规则。
      */
-    private fun parseParams(data: String): TaskParams {
-        return try {
-            val json = JSONObject(data)
-            TaskParams(
-                host = json.optString("host", data),
-                port = json.optInt("port", 80)
-            )
-        } catch (e: Exception) {
-            TaskParams(host = data)
+    private fun parseTcpTarget(data: String): HostPort.Result {
+        val json = try {
+            JSONObject(data)
+        } catch (_: Exception) {
+            null
         }
+        if (json != null) {
+            val host = json.optString("host", "").trim()
+            // host 缺失时（例如面板发来的其实是 `{}`）退回字符串解析，与旧行为一致
+            if (host.isNotEmpty()) {
+                return HostPort.of(host, json.optInt("port", DEFAULT_TCP_PING_PORT))
+            }
+        }
+        return HostPort.parse(data.trim(), defaultPort = DEFAULT_TCP_PING_PORT)
     }
 }

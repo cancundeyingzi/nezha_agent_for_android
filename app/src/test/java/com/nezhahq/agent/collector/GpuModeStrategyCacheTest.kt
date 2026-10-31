@@ -1,12 +1,13 @@
 package com.nezhahq.agent.collector
 
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class GpuModeStrategyCacheTest {
 
     @Test
-    fun `normal unavailable does not prevent privileged probe`() {
+    fun `normal unavailable does not prevent privileged probe`() = runBlocking {
         val cache = GpuModeStrategyCache()
         var privilegedProbes = 0
 
@@ -32,7 +33,7 @@ class GpuModeStrategyCacheTest {
     }
 
     @Test
-    fun `collector cache instances do not share strategy`() {
+    fun `collector cache instances do not share strategy`() = runBlocking {
         val first = GpuModeStrategyCache()
         val second = GpuModeStrategyCache()
         var secondProbes = 0
@@ -58,7 +59,7 @@ class GpuModeStrategyCacheTest {
     }
 
     @Test
-    fun `switching mode uses each modes cached strategy`() {
+    fun `switching mode uses each modes cached strategy`() = runBlocking {
         val cache = GpuModeStrategyCache()
         var normalProbes = 0
         var privilegedProbes = 0
@@ -104,7 +105,7 @@ class GpuModeStrategyCacheTest {
     }
 
     @Test
-    fun `privileged unavailable retries after bounded negative cache ttl`() {
+    fun `privileged unavailable retries after bounded negative cache ttl`() = runBlocking {
         var nowMs = 1_000L
         var probes = 0
         val cache = GpuModeStrategyCache(
@@ -145,8 +146,45 @@ class GpuModeStrategyCacheTest {
         assertEquals(2, probes)
     }
 
+    /**
+     * A cached read that reports its strategy died must not deadlock, and must hand the next call
+     * back to the probe. Reporting through the return value is the only safe channel: the cache
+     * holds a non-reentrant mutex across `readCached`, so a call back into the cache would hang.
+     */
     @Test
-    fun `initial dumpsys probe result is reused within throttle interval`() {
+    fun `dead cached strategy is dropped and re-probed`() = runBlocking {
+        val cache = GpuModeStrategyCache()
+        var probes = 0
+
+        cache.collect(
+            isPrivileged = true,
+            readCached = { error("strategy should not already be cached") },
+            probe = {
+                probes++
+                GpuProbeResult(GpuCollectionStrategy.DIRECT, listOf(30.0))
+            }
+        )
+        val afterDeadRead = cache.collect(
+            isPrivileged = true,
+            readCached = { null },
+            probe = { error("the cached strategy is still valid on this call") }
+        )
+        val afterReprobe = cache.collect(
+            isPrivileged = true,
+            readCached = { error("the dead strategy should have been dropped") },
+            probe = {
+                probes++
+                GpuProbeResult(GpuCollectionStrategy.SHELL_FS, listOf(55.0))
+            }
+        )
+
+        assertEquals(emptyList<Double>(), afterDeadRead)
+        assertEquals(listOf(55.0), afterReprobe)
+        assertEquals(2, probes)
+    }
+
+    @Test
+    fun `initial dumpsys probe result is reused within throttle interval`() = runBlocking {
         var nowMs = 10_000L
         var reads = 0
         val throttle = GpuDumpsysThrottle(

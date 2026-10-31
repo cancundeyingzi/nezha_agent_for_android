@@ -1,6 +1,5 @@
 package com.nezhahq.agent.util
 
-import com.nezhahq.agent.service.DashboardSessionWatchdog
 import org.junit.Assert.assertTrue
 import org.junit.Test
 

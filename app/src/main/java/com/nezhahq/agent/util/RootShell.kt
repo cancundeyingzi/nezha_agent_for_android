@@ -27,6 +27,7 @@ import rikka.shizuku.ShizukuRemoteProcess
 object RootShell {
     private const val RETRY_COOLDOWN_MS = 30_000L
     private const val MARKER_RANDOM_BYTES = 24
+    private const val MAX_LOGGED_COMMAND_TOKEN = 32
     private val markerRandom = SecureRandom()
 
     private val managedProcessLock = Any()
@@ -41,7 +42,10 @@ object RootShell {
             if (command == "<start>") {
                 Logger.e("RootShell: 建立 Shell 会话失败", exception)
             } else {
-                Logger.e("RootShell: 执行命令失败 [$command]，正在重置会话（${exception.javaClass.name}）", exception)
+                Logger.e(
+                    "RootShell: 执行命令失败（${describeCommandForLog(command)}），正在重置会话",
+                    exception
+                )
             }
         }
     )
@@ -349,6 +353,24 @@ object RootShell {
             Logger.e("RootShell: 检测 Shizuku 状态时异常", exception)
             false
         }
+    }
+
+    /**
+     * Reduces a failed command to what a bug report needs — its leading token and its length —
+     * instead of echoing the command line.
+     *
+     * `TaskExecutor` already treats shell command text as unloggable: its timeout path records only
+     * the task id, because dashboard-supplied commands routinely carry credentials while the in-app
+     * log view and logcat are both readable. Everything reaching this shell is assembled in-process
+     * today (`cat /sys/...`, `ls -1Ap <path>`), so nothing leaks yet — but the argument list is
+     * exactly where a secret would appear, and holding both call sites to the same rule means a
+     * future caller cannot turn this line into a disclosure without anyone noticing.
+     */
+    private fun describeCommandForLog(command: String): String {
+        val token = command.trimStart()
+            .takeWhile { !it.isWhitespace() }
+            .take(MAX_LOGGED_COMMAND_TOKEN)
+        return "命令=${token.ifEmpty { "<空>" }}，长度=${command.length}"
     }
 
     private fun newMarkerToken(): String {

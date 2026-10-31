@@ -14,6 +14,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.isActive
@@ -21,7 +22,17 @@ import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+
+/**
+ * File-level so the tone generator and the AudioTrack it feeds cannot disagree.
+ *
+ * The two live in separate classes here, and while this sat inside [AudioKeepAlive]'s private
+ * companion the factory could not reach it and open-coded the same 8000 twice. A mismatch fails
+ * quietly: it only detunes the inaudible tone the keep-alive depends on.
+ */
+private const val SAMPLE_RATE = 8_000
 
 internal interface AudioOutput {
     val bufferSizeSamples: Int
@@ -171,12 +182,25 @@ internal class AudioKeepAlive(
                 .onFailure { Logger.e("$TAG: 中断音频写入异常", it) }
         }
         val releaseJob = cleanupScope.async {
-            runCatching {
-                output.release()
-                true
-            }.onFailure {
-                Logger.e("$TAG: 强制释放音频异常", it)
-            }.getOrDefault(false)
+            // A release that has begun must finish, and this says so rather than relying on
+            // whichever implementation is behind the interface. KeepAliveController cancels this
+            // scope the moment its bounded teardown returns, which can land inside a slow release.
+            // `AudioTrack.release` is a blocking native call that would complete regardless — but
+            // `AudioOutput` is an interface, and nothing obliges the next thing behind it to be
+            // equally uninterruptible.
+            //
+            // Widening the cleanup budget was the alternative, and it would have done nothing: the
+            // 250ms audio waiter is already longer than the controller's per-resource share of the
+            // teardown deadline, which cuts it short first. Only raising that deadline would help,
+            // and every runtime reload and every service stop waits it out.
+            withContext(NonCancellable) {
+                runCatching {
+                    output.release()
+                    true
+                }.onFailure {
+                    Logger.e("$TAG: 强制释放音频异常", it)
+                }.getOrDefault(false)
+            }
         }
         return CleanupAttempt(interruptJob, releaseJob)
     }
@@ -241,7 +265,6 @@ internal class AudioKeepAlive(
 
     private companion object {
         const val TAG = "AudioKeepAlive"
-        const val SAMPLE_RATE = 8_000
     }
 }
 
@@ -256,7 +279,7 @@ private class TimeoutAudioCleanupWaiter(
 private class AndroidAudioOutputFactory : AudioOutputFactory {
     override fun create(): AudioOutput {
         val bufferSizeBytes = AudioTrack.getMinBufferSize(
-            8_000,
+            SAMPLE_RATE,
             AudioFormat.CHANNEL_OUT_MONO,
             AudioFormat.ENCODING_PCM_16BIT
         )
@@ -271,7 +294,7 @@ private class AndroidAudioOutputFactory : AudioOutputFactory {
             )
             .setAudioFormat(
                 AudioFormat.Builder()
-                    .setSampleRate(8_000)
+                    .setSampleRate(SAMPLE_RATE)
                     .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                     .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                     .build()

@@ -1,5 +1,7 @@
 package com.nezhahq.agent.simulator
 
+import com.nezhahq.agent.util.ByteUnits.GIB
+import com.nezhahq.agent.util.ByteUnits.MIB
 import proto.Nezha.GeoIP
 import proto.Nezha.Host
 import proto.Nezha.IP
@@ -10,9 +12,6 @@ import java.util.concurrent.ThreadLocalRandom
 import java.util.concurrent.TimeUnit
 
 object RandomDeviceFactory {
-    private const val MIB = 1024L * 1024L
-    private const val GIB = 1024L * MIB
-
     private val publicIpv4FirstOctets = intArrayOf(
         8, 13, 18, 20, 23, 34, 35, 40, 44, 45, 52, 54,
         64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75,
@@ -23,10 +22,10 @@ object RandomDeviceFactory {
         "US", "JP", "SG", "DE", "FR", "GB", "CA", "AU", "KR", "NL", "SE", "BR"
     )
     private val platforms = arrayOf(
-        PlatformProfile("Android", arrayOf("11", "12", "13", "14", "15")),
-        PlatformProfile("Linux", arrayOf("Ubuntu 22.04", "Debian 12", "Alpine 3.20", "Fedora 40")),
-        PlatformProfile("Windows", arrayOf("10.0.19045", "10.0.22631", "10.0.26100")),
-        PlatformProfile("Darwin", arrayOf("13.6", "14.5", "15.0"))
+        PlatformProfile("Android", listOf("11", "12", "13", "14", "15")),
+        PlatformProfile("Linux", listOf("Ubuntu 22.04", "Debian 12", "Alpine 3.20", "Fedora 40")),
+        PlatformProfile("Windows", listOf("10.0.19045", "10.0.22631", "10.0.26100")),
+        PlatformProfile("Darwin", listOf("13.6", "14.5", "15.0"))
     )
     private val cpus = arrayOf(
         "Qualcomm SM8650", "MediaTek Dimensity 9300", "Apple M2",
@@ -140,11 +139,20 @@ object RandomDeviceFactory {
 
     private fun <T> Array<T>.random(random: ThreadLocalRandom): T = this[random.nextInt(size)]
     private fun IntArray.random(random: ThreadLocalRandom): Int = this[random.nextInt(size)]
-    private fun List<Int>.random(random: ThreadLocalRandom): Int = this[random.nextInt(size)]
+    private fun <T> List<T>.random(random: ThreadLocalRandom): T = this[random.nextInt(size)]
 
+    /**
+     * `versions` is a List, not an Array, because this is a data class.
+     *
+     * A data class holding an array generates equals/hashCode that compare the array by identity,
+     * so two profiles with identical contents are unequal and one put in a set is unfindable. The
+     * declaration promises value semantics that the array silently withholds; only reading the
+     * generated code reveals it. Nothing compares profiles today, which is exactly why the trap
+     * would go unnoticed until something did.
+     */
     private data class PlatformProfile(
         val name: String,
-        val versions: Array<String>
+        val versions: List<String>
     )
 }
 

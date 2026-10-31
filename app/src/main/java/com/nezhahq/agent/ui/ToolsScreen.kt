@@ -18,7 +18,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.filled.Build
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -26,13 +25,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.*
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nezhahq.agent.core.model.SimulatedDeviceConfig
-import rikka.shizuku.Shizuku
 import com.nezhahq.agent.MainViewModel
+import com.nezhahq.agent.R
+import com.nezhahq.agent.util.PermissionChecker
+import com.nezhahq.agent.util.PermissionChecker.PermissionKey
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 // 工具页与配置页，以及它们共用的权限行和系统跳转工具。
 
@@ -43,19 +48,44 @@ fun ToolsScreenContent(
 ) {
     val context = LocalContext.current
     val scrollState = rememberScrollState()
+    // 权限刷新要读盘（getAllPermissionStatus 内部会读配置存储），必须在 IO 上执行，
+    // 故需要一个协程作用域给下面几处“事件驱动的刷新”使用。
+    val scope = rememberCoroutineScope()
 
     // ── 权限状态列表（响应式，自动驱动 UI 重组）──
+    // 初值给空列表 + 未加载标记：组合期不再同步读盘。原实现会在 composition 期调用
+    // getAllPermissionStatus → configRepository.loadAutoStartState()，那是一次会阻塞主线程的存储读取。
     var permissionList by remember {
-        mutableStateOf(com.nezhahq.agent.util.PermissionChecker.getAllPermissionStatus(context))
+        mutableStateOf<List<PermissionChecker.PermissionItem>>(emptyList())
+    }
+    var permissionsLoaded by remember { mutableStateOf(false) }
+
+    // 统一的权限刷新入口：始终在 IO 线程读盘、回主线程回填 state。
+    // 四处刷新（首次加载 / 返回前台 / 短信授权回调 / 自启开关保存后）都走这里，避免任何一处漏挪回主线程。
+    val refreshPermissions: () -> Unit = {
+        scope.launch {
+            val latest = withContext(Dispatchers.IO) {
+                PermissionChecker.getAllPermissionStatus(context)
+            }
+            permissionList = latest
+            permissionsLoaded = true
+        }
     }
 
+    // 首次进入时异步加载一次。key = Unit：只在进入组合时触发，不因重组反复重启。
+    LaunchedEffect(Unit) { refreshPermissions() }
+
     // ── 生命周期感知：从系统设置页返回时自动刷新权限状态 ──
+    // 说明：此处仍用 androidx.compose.ui.platform.LocalLifecycleOwner。理应迁到
+    // androidx.lifecycle.compose.LocalLifecycleOwner，但该符号需要 lifecycle-runtime-compose 2.8.0+，
+    // 本项目锁定 lifecycle 2.7.0 且未依赖该构件，符号不存在，迁移会编译失败——故保留并 @Suppress。
+    // （升级依赖属构建改动，超出本次 UI 修复范围。）
     @Suppress("DEPRECATION")
     val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                permissionList = com.nezhahq.agent.util.PermissionChecker.getAllPermissionStatus(context)
+                refreshPermissions()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -66,13 +96,36 @@ fun ToolsScreenContent(
     val smsPermLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
-        // 刷新全部权限状态
-        permissionList = com.nezhahq.agent.util.PermissionChecker.getAllPermissionStatus(context)
+        // 刷新全部权限状态（同样在 IO 上执行）
+        refreshPermissions()
         if (granted) {
             Toast.makeText(context, "短信权限已授予，可在终端中使用 @agent sms", Toast.LENGTH_SHORT).show()
         } else {
             Toast.makeText(context, "短信权限被拒绝", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    // ── B11：SMS 授权前的隐私披露弹窗 ──
+    // @agent sms 会返回最近短信的发件人与正文（OTP 级数据），面板侧却只表现为“允许远程执行命令”一个开关。
+    // 授权前先弹窗明确告知，用户确认后才真正发起系统权限请求。本次仅告知、不改行为。文案取自 strings.xml。
+    var showSmsDisclosure by remember { mutableStateOf(false) }
+    if (showSmsDisclosure) {
+        AlertDialog(
+            onDismissRequest = { showSmsDisclosure = false },
+            title = { Text(stringResource(R.string.sms_permission_disclosure_title)) },
+            text = { Text(stringResource(R.string.sms_permission_disclosure_message)) },
+            confirmButton = {
+                GlassButtonPrimary(onClick = {
+                    showSmsDisclosure = false
+                    smsPermLauncher.launch(Manifest.permission.READ_SMS)
+                }) { Text(stringResource(R.string.sms_permission_disclosure_confirm)) }
+            },
+            dismissButton = {
+                GlassButtonSecondary(onClick = { showSmsDisclosure = false }) {
+                    Text(stringResource(R.string.sms_permission_disclosure_cancel))
+                }
+            }
+        )
     }
 
     Column(
@@ -214,17 +267,40 @@ fun ToolsScreenContent(
                 modifier = Modifier.padding(bottom = 8.dp)
             )
 
+            if (!permissionsLoaded) {
+                // 权限状态尚在 IO 线程加载中，先显示加载态；组合期不再阻塞读盘。
+                Row(
+                    modifier = Modifier.padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = LgPrimary
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        "正在检测权限状态…",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = LgOnSurfaceVariant
+                    )
+                }
+            }
+
             permissionList.forEach { item ->
                 Spacer(modifier = Modifier.height(4.dp))
                 PermissionStatusRow(
                     item = item,
-                    actionEnabled = item.key != "auto_start" ||
-                        vm.canEditConfig,
+                    // 仅“应用内本地开关”（开机自启）受配置可写状态约束；其余跳系统页/弹授权的项不受限。
+                    actionEnabled = !item.key.isLocalToggle || vm.canEditConfig,
                     onAction = {
-                        // 根据权限类型执行不同的授权动作
+                        // 根据权限类型执行不同的授权动作。
+                        // when 对 PermissionKey 穷举、无 else：日后新增权限项若漏了分支会编译失败，
+                        // 而不是像旧的字面量 when 那样静默变成“按钮点了没反应”。
                         when (item.key) {
-                            "sms" -> smsPermLauncher.launch(Manifest.permission.READ_SMS)
-                            "usage_stats" -> {
+                            // B11：短信不直接拉起系统授权，先弹隐私披露，用户确认后再请求。
+                            PermissionKey.SMS -> showSmsDisclosure = true
+                            PermissionKey.USAGE_STATS -> {
                                 val specificIntent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).apply {
                                     data = Uri.parse("package:${context.packageName}")
                                 }
@@ -236,39 +312,38 @@ fun ToolsScreenContent(
                                     Toast.makeText(context, "无法打开使用情况访问设置", Toast.LENGTH_SHORT).show()
                                 }
                             }
-                            "accessibility" -> safeStartActivity(context, Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-                            "overlay" -> safeStartActivity(context, Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION).apply {
+                            PermissionKey.ACCESSIBILITY -> safeStartActivity(context, Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                            PermissionKey.OVERLAY -> safeStartActivity(context, Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION).apply {
                                 data = Uri.parse("package:${context.packageName}")
                             })
-                            "battery" -> {
-                                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                            PermissionKey.BATTERY -> {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                                     safeStartActivity(context, Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
                                         data = Uri.parse("package:${context.packageName}")
                                     })
                                 }
                             }
-                            "notification" -> {
+                            PermissionKey.NOTIFICATION -> {
                                 safeStartActivity(context, Intent().apply {
                                     action = Settings.ACTION_APP_NOTIFICATION_SETTINGS
                                     putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
                                 })
                             }
-                            "auto_start" -> {
+                            PermissionKey.AUTO_START -> {
                                 vm.toggleAutoStart(!item.granted) {
-                                    permissionList =
-                                        com.nezhahq.agent.util.PermissionChecker
-                                            .getAllPermissionStatus(context)
+                                    // 保存成功回调在主线程，刷新仍走统一的 IO 入口。
+                                    refreshPermissions()
                                 }
                             }
-                            "storage" -> {
-                                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                            PermissionKey.STORAGE -> {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                                     safeStartActivity(context, Intent(
-                                        android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                                        Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
                                         Uri.parse("package:${context.packageName}")
                                     ))
                                 } else {
                                     safeStartActivity(context, Intent(
-                                        android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                                         Uri.parse("package:${context.packageName}")
                                     ))
                                 }
@@ -331,14 +406,14 @@ fun ToolsScreenContent(
         }
 
         if (vm.isVpnTrafficCompatibilityAvailable) {
-            val vpnContext = androidx.compose.ui.platform.LocalContext.current
+            // 复用外层已取得的 context，不再重复调用 LocalContext.current。
             val vpnAuthLauncher = rememberLauncherForActivityResult(
                 contract = ActivityResultContracts.StartActivityForResult()
             ) { result ->
                 if (result.resultCode == ComponentActivity.RESULT_OK) {
                     vm.setVpnTraffic(true)
                 } else {
-                    Toast.makeText(vpnContext, "VPN 授权被拒绝", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "VPN 授权被拒绝", Toast.LENGTH_SHORT).show()
                 }
             }
 
@@ -352,7 +427,7 @@ fun ToolsScreenContent(
                         enabled = vm.canEditConfig,
                         onCheckedChange = { newValue ->
                             if (newValue) {
-                                val prepareIntent = VpnService.prepare(vpnContext)
+                                val prepareIntent = VpnService.prepare(context)
                                 if (prepareIntent != null) {
                                     vpnAuthLauncher.launch(prepareIntent)
                                 } else {
@@ -426,7 +501,7 @@ internal fun EtherToggleRow(
  */
 @Composable
 internal fun PermissionStatusRow(
-    item: com.nezhahq.agent.util.PermissionChecker.PermissionItem,
+    item: PermissionChecker.PermissionItem,
     actionEnabled: Boolean = true,
     onAction: () -> Unit
 ) {
@@ -446,11 +521,21 @@ internal fun PermissionStatusRow(
             fontSize = 14.sp
         )
         Spacer(modifier = Modifier.width(8.dp))
-        Text(
-            text = item.name,
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.weight(1f)
-        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = item.name,
+                style = MaterialTheme.typography.bodyMedium
+            )
+            // B11：对隐私敏感权限（当前仅短信）显示二级披露文案，说明授权后面板能读什么。
+            item.description?.let { desc ->
+                Text(
+                    text = desc,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = LgOnSurfaceVariant
+                )
+            }
+        }
+        Spacer(modifier = Modifier.width(8.dp))
         if (!item.granted) {
             TextButton(
                 onClick = onAction,
@@ -459,7 +544,8 @@ internal fun PermissionStatusRow(
                 colors = ButtonDefaults.textButtonColors(contentColor = LgCyan600)
             ) {
                 Text(
-                    text = if (item.key == "auto_start") "启用" else "去授权",
+                    // 本地开关（开机自启）文案为“启用”，其余跳系统页/弹授权的项为“去授权”。
+                    text = if (item.key.isLocalToggle) "启用" else "去授权",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold
                 )

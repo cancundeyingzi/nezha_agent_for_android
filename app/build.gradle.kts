@@ -1,7 +1,7 @@
 plugins {
-    id("com.android.application")
-    id("org.jetbrains.kotlin.android")
-    id("com.google.protobuf")
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.protobuf)
 }
 
 android {
@@ -45,8 +45,19 @@ android {
         // path logs need SilentLoggerRule; see its documentation.
         unitTests.isReturnDefaultValues = false
     }
+    lint {
+        // TEMPORARY, and only so CI can start running lint at all. The manifest declares several
+        // restricted permissions the agent genuinely needs (QUERY_ALL_PACKAGES, READ_SMS,
+        // MANAGE_EXTERNAL_STORAGE, BATTERY_STATS, PACKAGE_USAGE_STATS), each already carrying a
+        // reviewed `tools:ignore`; turning lint on in blocking mode before anyone has seen the
+        // report would fail the first build for findings nobody has triaged.
+        //
+        // Next step is to read one CI run's report, fix or baseline what it found, then delete
+        // this line so a new lint error breaks the build like a failing test does.
+        abortOnError = false
+    }
     composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.8"
+        kotlinCompilerExtensionVersion = libs.versions.composeCompiler.get()
     }
     packaging {
         resources {
@@ -57,53 +68,54 @@ android {
     }
 }
 
-val grpcVersion = "1.62.2"
-val grpcKotlinVersion = "1.4.1"
-val protobufVersion = "3.25.3"
-
 dependencies {
 
     // Pure-Kotlin domain rules. The dependency is one-way: :core must never depend on :app.
     implementation(project(":core"))
 
-    implementation("androidx.core:core-ktx:1.12.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
-    implementation("androidx.activity:activity-ktx:1.8.2")
-    implementation("androidx.activity:activity-compose:1.8.2")
-    implementation(platform("androidx.compose:compose-bom:2024.02.00"))
-    implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.ui:ui-graphics")
-    implementation("androidx.compose.ui:ui-tooling-preview")
-    implementation("androidx.compose.material3:material3")
-    
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.androidx.activity.ktx)
+    implementation(libs.androidx.activity.compose)
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.compose.ui)
+    implementation(libs.androidx.compose.ui.graphics)
+    implementation(libs.androidx.compose.ui.tooling.preview)
+    implementation(libs.androidx.compose.material3)
+
     // Read-only migration from the legacy EncryptedSharedPreferences store.
-    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    implementation(libs.androidx.security.crypto)
 
     // OKHTTP for Trace and Tasks
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation(libs.okhttp)
 
     // gRPC & Protobuf
-    implementation("io.grpc:grpc-okhttp:$grpcVersion")
-    implementation("io.grpc:grpc-protobuf-lite:$grpcVersion")
-    implementation("io.grpc:grpc-stub:$grpcVersion")
-    implementation("io.grpc:grpc-kotlin-stub:$grpcKotlinVersion")
-    implementation("com.google.protobuf:protobuf-javalite:$protobufVersion")
+    implementation(libs.grpc.okhttp)
+    implementation(libs.grpc.protobuf.lite)
+    implementation(libs.grpc.stub)
+    implementation(libs.grpc.kotlin.stub)
+    implementation(libs.protobuf.javalite)
 
     // Shizuku API：提供 ADB 级别的高权限 Shell 执行能力，
     // 当设备无 Root 但安装了 Shizuku 应用时，可作为 su 的替代方案。
-    val shizukuVersion = "13.1.5"
-    implementation("dev.rikka.shizuku:api:$shizukuVersion")
-    implementation("dev.rikka.shizuku:provider:$shizukuVersion")
+    implementation(libs.shizuku.api)
+    implementation(libs.shizuku.provider)
 
-    compileOnly("org.apache.tomcat:annotations-api:6.0.53") // For javax.annotation.Generated
+    compileOnly(libs.tomcat.annotations.api) // For javax.annotation.Generated
 
-    testImplementation("junit:junit:4.13.2")
+    testImplementation(libs.junit)
     // No androidTest dependencies: there is no app/src/androidTest source set. Espresso and
     // compose-ui-test were declared but never used, which made the project look like it had
     // instrumented coverage. Add them back alongside the first test that needs them.
-    debugImplementation("androidx.compose.ui:ui-tooling")
+    debugImplementation(libs.androidx.compose.ui.tooling)
 }
+
+// The protobuf plugin configures codegen with plain coordinate strings rather than dependency
+// notations, so these three read the version out of the catalog instead of aliasing a library.
+val grpcVersion = libs.versions.grpc.get()
+val grpcKotlinVersion = libs.versions.grpcKotlin.get()
+val protobufVersion = libs.versions.protobuf.get()
 
 protobuf {
     protoc {

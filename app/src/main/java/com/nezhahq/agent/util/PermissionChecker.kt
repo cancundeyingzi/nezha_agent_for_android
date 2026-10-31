@@ -9,6 +9,7 @@ import android.os.PowerManager
 import android.os.Process
 import android.provider.Settings
 import androidx.core.app.NotificationManagerCompat
+import com.nezhahq.agent.R
 import com.nezhahq.agent.appContainer
 import androidx.core.content.ContextCompat
 
@@ -27,16 +28,38 @@ import androidx.core.content.ContextCompat
 object PermissionChecker {
 
     /**
+     * 权限项的类型安全标识。
+     *
+     * 取代原先的 `String` key：UI 的 `when (item.key)` 因此能被编译器强制穷举（无 else），
+     * 新增权限项时若漏了分支会**编译失败**，而不是像字面量那样静默变成“按钮点了没反应”。
+     */
+    enum class PermissionKey {
+        SMS, USAGE_STATS, ACCESSIBILITY, OVERLAY, BATTERY, NOTIFICATION, AUTO_START, STORAGE;
+
+        /**
+         * 是否为“应用内本地开关”，而非跳系统设置页 / 弹运行时授权。
+         *
+         * 目前仅开机自启（[AUTO_START]）：其状态存在本地配置里、点击即切换，因此按钮文案是“启用”，
+         * 且受 `canEditConfig`（配置可写）约束。其余权限都跳系统页或弹系统授权框，不受此约束。
+         * UI 的两处特判（按钮可用性、按钮文案）都据此判断，避免再散落字面量 "auto_start"。
+         */
+        val isLocalToggle: Boolean get() = this == AUTO_START
+    }
+
+    /**
      * 单项权限状态数据类。
      *
      * @param name   权限显示名称（中文）
-     * @param key    权限唯一标识键（用于 UI key 和区分逻辑）
+     * @param key    权限类型标识（见 [PermissionKey]）
      * @param granted 是否已授予
+     * @param description 可选的二级说明。用于对隐私敏感的权限追加披露（如 SMS，见 B11）；
+     *                    为 null 时列表项不显示二级文案。
      */
     data class PermissionItem(
         val name: String,
-        val key: String,
-        val granted: Boolean
+        val key: PermissionKey,
+        val granted: Boolean,
+        val description: String? = null
     )
 
     /**
@@ -49,42 +72,45 @@ object PermissionChecker {
         return listOf(
             PermissionItem(
                 name = "短信读取权限",
-                key = "sms",
-                granted = checkSmsPermission(context)
+                key = PermissionKey.SMS,
+                granted = checkSmsPermission(context),
+                // B11：短信是 OTP 级敏感数据，向用户明确披露它被 @agent sms 远程读取。
+                // 文案取自 strings.xml，不硬编码。
+                description = context.getString(R.string.sms_permission_list_desc)
             ),
             PermissionItem(
                 name = "使用情况访问权限",
-                key = "usage_stats",
+                key = PermissionKey.USAGE_STATS,
                 granted = checkUsageStatsPermission(context)
             ),
             PermissionItem(
                 name = "无障碍服务",
-                key = "accessibility",
+                key = PermissionKey.ACCESSIBILITY,
                 granted = checkAccessibilityEnabled(context)
             ),
             PermissionItem(
                 name = "悬浮窗权限",
-                key = "overlay",
+                key = PermissionKey.OVERLAY,
                 granted = checkOverlayPermission(context)
             ),
             PermissionItem(
                 name = "电池优化豁免",
-                key = "battery",
+                key = PermissionKey.BATTERY,
                 granted = checkBatteryOptimization(context)
             ),
             PermissionItem(
                 name = "通知权限",
-                key = "notification",
+                key = PermissionKey.NOTIFICATION,
                 granted = checkNotificationPermission(context)
             ),
             PermissionItem(
                 name = "开机自启动",
-                key = "auto_start",
+                key = PermissionKey.AUTO_START,
                 granted = context.appContainer.configRepository.loadAutoStartState().enabled
             ),
             PermissionItem(
                 name = "所有文件访问",
-                key = "storage",
+                key = PermissionKey.STORAGE,
                 granted = checkStoragePermission(context)
             )
         )

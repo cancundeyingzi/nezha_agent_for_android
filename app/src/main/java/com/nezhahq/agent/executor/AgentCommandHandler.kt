@@ -9,6 +9,9 @@ import android.os.Environment
 import android.provider.Telephony
 import androidx.core.content.ContextCompat
 import com.nezhahq.agent.service.KeepAliveAccessibilityService
+import com.nezhahq.agent.util.ByteUnits.GIB
+import com.nezhahq.agent.util.ByteUnits.KIB
+import com.nezhahq.agent.util.ByteUnits.MIB
 import com.nezhahq.agent.util.Logger
 import com.nezhahq.agent.util.RootShell
 import com.nezhahq.agent.util.shellEscape
@@ -336,12 +339,16 @@ class AgentCommandHandler(private val context: Context) {
             val parent = File(targetPath).parent?.takeIf { it.isNotBlank() } ?: defaultScreenshotDir()
             val escapedParent = shellEscape(parent)
             val escapedTarget = shellEscape(targetPath)
+            // chmod 600 与 FileManager 的上传路径保持一致，理由相同：这段脚本以 root 运行，
+            // 666 会让一张可能含验证码/聊天内容的截图对设备上任意应用可读可写。
+            // 补充：默认目录 /sdcard 是 FUSE 挂载，chmod 在那里本就被内核忽略；这条命令只在面板
+            // 显式指定 /data/local/tmp 这类真实文件系统路径时才生效——而那恰恰是有风险的场景。
             val command = """
                 mkdir -p $escapedParent 2>&1
                 screencap -p $escapedTarget 2>&1
                 status=${'$'}?
                 if [ "${'$'}status" -eq 0 ] && [ -s $escapedTarget ]; then
-                    chmod 666 $escapedTarget 2>/dev/null
+                    chmod 600 $escapedTarget 2>/dev/null
                     bytes=${'$'}(wc -c < $escapedTarget 2>/dev/null | tr -d ' ')
                     echo "$SHELL_SUCCESS_MARKER${'$'}bytes"
                 else
@@ -437,9 +444,6 @@ class AgentCommandHandler(private val context: Context) {
     private companion object {
         const val SHELL_SUCCESS_MARKER = "__NEZHA_SCREENSHOT_OK__:"
         const val SHELL_FAILURE_MARKER = "__NEZHA_SCREENSHOT_FAIL__:"
-        const val KIB = 1024L
-        const val MIB = 1024L * KIB
-        const val GIB = 1024L * MIB
 
         val screenshotDateFormat = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
     }

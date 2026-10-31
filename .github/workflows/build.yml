@@ -10,6 +10,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege, stated explicitly: this workflow only ever reads the repository. Without the
+# block, the job inherits whatever the repository default is — which for older repositories is
+# read/write on every scope, handing a compromised build step a token that can push.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -31,6 +37,11 @@ jobs:
       - name: Release build
         run: ./gradlew :app:assembleRelease
 
+      # Non-blocking for now — see the `lint` block in app/build.gradle.kts. This run exists to
+      # produce the first baseline; the step turns into a real gate once that baseline is triaged.
+      - name: Android lint
+        run: ./gradlew :app:lintRelease
+
       - name: Upload test reports
         if: failure()
         uses: actions/upload-artifact@v4
@@ -39,4 +50,5 @@ jobs:
           path: |
             app/build/reports/tests/
             core/build/reports/tests/
+            app/build/reports/lint-results-release.html
           retention-days: 7

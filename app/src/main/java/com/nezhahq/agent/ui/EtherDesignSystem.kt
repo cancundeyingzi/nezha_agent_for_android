@@ -19,13 +19,10 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlin.math.PI
-import kotlin.math.abs
-import kotlin.math.cos
-import kotlin.math.pow
-import kotlin.math.sin
 
 // Liquid Glass 设计系统：配色、形状、阴影与基础控件。
+// 说明：曲线数学（PI/sin/cos/pow 等）已抽到 SmoothCorner.kt 的 traceSmoothCorner，
+// 本文件不再直接引用 kotlin.math.*，故移除相应 import。
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Liquid Glass 调色板（源自 Tailwind 配置）
@@ -66,7 +63,6 @@ internal val LgError = Color(0xFFF44336)
 /** Nekogram 底栏默认配色 */
 internal val NekoGlassBarFillTop = Color(0xD9FFFFFF)
 internal val NekoGlassBarFillBottom = Color(0xD9FFFFFF)
-internal val NekoGlassBarStroke = Color(0x20000000)
 internal val NekoGlassTabSelected = Color(0xFF1A91E6)
 internal val NekoGlassTabSelectedText = Color(0xFF0D7FCF)
 internal val NekoGlassTabUnselected = Color(0xFF1A1D21)

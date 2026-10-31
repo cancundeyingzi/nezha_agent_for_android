@@ -200,12 +200,6 @@ class AgentService : Service() {
         fun startOrReload(context: Context) = send(context, ACTION_START_OR_RELOAD)
 
         /**
-         * Requests a persisted-config reload only when this process owns a live service instance.
-         */
-        fun requestReloadIfRunning(context: Context): Boolean =
-            sendIfRunning(context, ACTION_START_OR_RELOAD)
-
-        /**
          * Applies changed remote capability grants to the live runtime without reconnecting.
          *
          * Returns false when no service instance is running, in which case the next start already
@@ -213,9 +207,6 @@ class AgentService : Service() {
          */
         fun requestCapabilityRefreshIfRunning(context: Context): Boolean =
             sendIfRunning(context, ACTION_REFRESH_CAPABILITIES)
-
-        internal fun isRunningInProcess(): Boolean =
-            AgentServiceRunningState.canRequestReload()
 
         private fun sendIfRunning(context: Context, action: String): Boolean {
             if (!AgentServiceRunningState.canRequestReload()) return false

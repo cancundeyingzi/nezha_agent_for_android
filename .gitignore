@@ -46,6 +46,15 @@ app/release/
 # Custom test/debug output
 status.txt
 decompiled/
+
+# One-off reports, scratch pages and analyses go here. A directory rather than a filename list:
+# the list below only ever matched reports that already existed, so the next one written under a
+# new name would have been committed by accident.
+notes/
+
+# The pre-existing reports, kept listed on purpose. These files are still sitting in the working
+# tree; dropping their entries would not delete them, it would just make git start offering them
+# up as new untracked files. Delete an entry once its file is gone or has moved into notes/.
 CRASH_FIX_COMPLETED.md
 DIAGNOSTIC_LOGS_ADDED.md
 DIAGNOSTIC_LOGS_ENHANCED.md

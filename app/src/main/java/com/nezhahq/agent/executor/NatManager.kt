@@ -221,19 +221,15 @@ class NatManager(
         }
     }
 
-    private fun parseHostPort(hostPort: String): Pair<String, Int> {
-        val lastColon = hostPort.lastIndexOf(':')
-        require(lastColon > 0 && lastColon < hostPort.length - 1) {
-            "无效的 Host 格式: $hostPort（期望格式: host:port）"
+    /**
+     * 解析面板下发的目标 `host:port`。
+     *
+     * 规则与 TCP Ping 共用 [HostPort]，避免两处对同一格式给出不同答案；NAT 目标必须
+     * 显式带端口（转发到哪个端口没有合理的猜测），所以不传 defaultPort。
+     */
+    private fun parseHostPort(hostPort: String): Pair<String, Int> =
+        when (val result = HostPort.parse(hostPort)) {
+            is HostPort.Result.Parsed -> Pair(result.host, result.port)
+            is HostPort.Result.Invalid -> throw IllegalArgumentException(result.reason)
         }
-        var h = hostPort.substring(0, lastColon)
-        // 兼容 IPv6 的标准方括号格式，如: [::1]:8080
-        if (h.startsWith("[") && h.endsWith("]")) {
-            h = h.substring(1, h.length - 1)
-        }
-        val p = hostPort.substring(lastColon + 1).toIntOrNull()
-            ?: throw IllegalArgumentException("无效的端口号: ${hostPort.substring(lastColon + 1)}")
-        require(p in 1..65535) { "端口号超出范围: $p" }
-        return Pair(h, p)
-    }
 }

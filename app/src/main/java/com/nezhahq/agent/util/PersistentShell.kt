@@ -97,6 +97,26 @@ internal class ShellSession(
     }
 }
 
+/**
+ * The single liveness check for every privileged shell process in this package.
+ *
+ * `Process.isAlive()` is API 26+ while this app ships to API 23, so liveness has to be inferred
+ * from [Process.exitValue]. The second catch is not redundant: a Shizuku shell is a remote process
+ * whose `exitValue()` reports "still running" as [IllegalStateException] rather than the
+ * [IllegalThreadStateException] the JDK contract specifies, and treating that as "dead" would make
+ * every Shizuku session look like it had already exited.
+ */
+internal fun isProcessAlive(process: Process): Boolean {
+    return try {
+        process.exitValue()
+        false
+    } catch (_: IllegalThreadStateException) {
+        true
+    } catch (_: IllegalStateException) {
+        true
+    }
+}
+
 /** Serializes commands through one session and owns the reusable bounded reader thread. */
 internal class PersistentShell(
     private val sessionFactory: () -> ShellSession?,
@@ -165,10 +185,6 @@ internal class PersistentShell(
             }
             ""
         }
-    }
-
-    fun executeFirstLine(command: String, timeoutMs: Long = DEFAULT_SHELL_TIMEOUT_MS): String? {
-        return execute(command, timeoutMs).lineSequence().firstOrNull { it.isNotBlank() }
     }
 
     fun shutdown() {
@@ -278,15 +294,6 @@ internal class PersistentShell(
 
     private fun isShuttingDown(): Boolean = shutdownRequests.get() > 0
 
-    private fun isProcessAlive(process: Process): Boolean {
-        return try {
-            process.exitValue()
-            false
-        } catch (_: IllegalThreadStateException) {
-            true
-        }
-    }
-
     private fun unwrap(exception: Exception): Exception {
         return if (exception is ExecutionException) {
             (exception.cause as? Exception) ?: exception
@@ -310,6 +317,26 @@ internal class PersistentShell(
         fun cancel() {
             future?.cancel(true)
         }
+    }
+}
+
+/**
+ * The single liveness check for every privileged shell process in this package.
+ *
+ * `Process.isAlive()` is API 26+ while this app ships to API 23, so liveness has to be inferred
+ * from [Process.exitValue]. The second catch is not redundant: a Shizuku shell is a remote process
+ * whose `exitValue()` reports "still running" as [IllegalStateException] rather than the
+ * [IllegalThreadStateException] the JDK contract specifies, and treating that as "dead" would make
+ * every Shizuku session look like it had already exited.
+ */
+internal fun isProcessAlive(process: Process): Boolean {
+    return try {
+        process.exitValue()
+        false
+    } catch (_: IllegalThreadStateException) {
+        true
+    } catch (_: IllegalStateException) {
+        true
     }
 }
 

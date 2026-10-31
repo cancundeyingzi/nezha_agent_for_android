@@ -21,10 +21,9 @@ import com.nezhahq.agent.executor.TaskExecutor
 import com.nezhahq.agent.executor.TerminalManager
 import com.nezhahq.agent.grpc.GrpcConnection
 import com.nezhahq.agent.grpc.GrpcConnectionState
-import com.nezhahq.agent.grpc.GrpcManager
 import com.nezhahq.agent.grpc.GrpcTransportMode
-import com.nezhahq.agent.grpc.ManagedGrpcConnection
 import com.nezhahq.agent.service.keepalive.KeepAliveController
+import com.nezhahq.agent.util.DashboardSessionWatchdog
 import com.nezhahq.agent.util.Logger
 import com.nezhahq.agent.util.RootShell
 import io.grpc.Status
@@ -38,6 +37,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -128,10 +128,34 @@ internal class AgentRuntime(
     private val gpuCollector = GpuCollector()
     private val stateCollector = SystemStateCollector(appContext, gpuCollector, ioDispatcher)
     private val capabilities = AtomicReference(config.remoteCapabilities)
+    private val reconnectBackoff = ReconnectBackoffPolicy()
+
+    /**
+     * The single in-flight GeoIP report triggered by a network change.
+     *
+     * `onAvailable` arrives on a system thread and fires again on every WiFi/cellular flip, so each
+     * event atomically replaces the previous attempt instead of stacking another fetch-and-report
+     * coroutine beside it. Only the newest network is worth reporting, and a switch that flaps
+     * would otherwise leave several probes racing to describe networks that are already gone.
+     */
+    private val geoIpReportJob = AtomicReference<Job?>(null)
 
     private var state = LifecycleState.NEW
+
+    /**
+     * Handles for the two long-lived jobs [start] launches.
+     *
+     * `@Volatile` rather than [lifecycleLock]: they are cleared inside the shutdown coordinator's
+     * suspending teardown step, and holding a blocking monitor across `supervisor.cancelAndJoin()`
+     * would trade a memory-visibility question for a real deadlock risk. Cancellation itself never
+     * goes through these fields — `supervisor` owns both jobs — so publication is all they need.
+     */
+    @Volatile
     private var connectionJob: Job? = null
+
+    @Volatile
     private var cleanupJob: Job? = null
+
     private var networkRegistration: RuntimeNetworkRegistration? = null
     private val shutdownCoordinator = RuntimeShutdownCoordinator(
         cancelAndJoinWork = {
@@ -216,28 +240,37 @@ internal class AgentRuntime(
 
     private fun reportGeoIpAfterNetworkChange() {
         Logger.i("Network dynamically available, polling full GeoIP metadata...")
-        scope.launch {
-            try {
-                val geoIp = DashboardSessionWatchdog.callWithin(
-                    DashboardSessionWatchdog.HANDSHAKE_TIMEOUT_MS,
-                    "NetworkCallback FetchGeoIP"
-                ) {
-                    GeoIpCollector.fetchGeoIP()
-                }
-                val stub = grpcConnection.stub
-                if (geoIp != null && stub != null) {
-                    DashboardSessionWatchdog.callWithin(
-                        DashboardSessionWatchdog.HANDSHAKE_TIMEOUT_MS,
-                        "NetworkCallback ReportGeoIP"
-                    ) {
-                        stub.reportGeoIP(geoIp)
-                    }
-                }
-            } catch (cancellation: CancellationException) {
-                throw cancellation
-            } catch (exception: Exception) {
-                Logger.e("GeoIP 上报失败（将在下次连接成功后重试）", exception)
+        // Started lazily so the swap below is complete before the attempt can run: the previous one
+        // is always cancelled first, and two probes can never overlap however fast the system
+        // thread delivers callbacks.
+        val attempt = scope.launch(start = CoroutineStart.LAZY) { reportGeoIpNow() }
+        geoIpReportJob.getAndSet(attempt)?.cancel()
+        // Clears only its own entry, so a newer attempt installed in the meantime is not dropped.
+        attempt.invokeOnCompletion { geoIpReportJob.compareAndSet(attempt, null) }
+        attempt.start()
+    }
+
+    private suspend fun reportGeoIpNow() {
+        try {
+            val geoIp = DashboardSessionWatchdog.callWithin(
+                DashboardSessionWatchdog.HANDSHAKE_TIMEOUT_MS,
+                "NetworkCallback FetchGeoIP"
+            ) {
+                GeoIpCollector.fetchGeoIP()
             }
+            val stub = grpcConnection.stub
+            if (geoIp != null && stub != null) {
+                DashboardSessionWatchdog.callWithin(
+                    DashboardSessionWatchdog.HANDSHAKE_TIMEOUT_MS,
+                    "NetworkCallback ReportGeoIP"
+                ) {
+                    stub.reportGeoIP(geoIp)
+                }
+            }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (exception: Exception) {
+            Logger.e("GeoIP 上报失败（将在下次连接成功后重试）", exception)
         }
     }
 
@@ -271,7 +304,9 @@ internal class AgentRuntime(
                     throw cancellation
                 } catch (secondary: Throwable) {
                     Logger.e("AgentRuntime: 连接失败处理自身异常，仍将继续重连", secondary)
-                    delay(DashboardSessionWatchdog.RECONNECT_BACKOFF_MS)
+                    // Draws from the same schedule, so a handler that keeps failing backs off too
+                    // rather than spinning at whatever the first tier happens to be.
+                    delay(reconnectBackoff.nextDelayMillis())
                 }
             }
         }
@@ -327,37 +362,59 @@ internal class AgentRuntime(
                     DashboardSessionWatchdog.STATE_RECEIPT_TIMEOUT_MS,
                     "ReportSystemState receipt"
                 )
-                if (connectionMarked.compareAndSet(false, true)) showConnectedStatus()
+                if (connectionMarked.compareAndSet(false, true)) {
+                    // The first receipt is the only proof the session works end to end: a rebuilt
+                    // channel proves nothing, and resetting on that instead would hand a Dashboard
+                    // that accepts connections and then drops them the flat five-second retry the
+                    // backoff exists to replace.
+                    reconnectBackoff.reset()
+                    showConnectedStatus()
+                }
             }
         } finally {
             receipts.cancel()
         }
     }
 
-    private suspend fun handleTaskStream(stub: NezhaServiceCoroutineStub) = coroutineScope {
+    /**
+     * Owns everything the task side of a connection needs, and outlives any single requestTask
+     * stream.
+     *
+     * The workers, both channels, the session registry and every live stream session belong to this
+     * scope; the requestTask stream itself belongs to a shorter-lived one inside
+     * [consumeWithIdleRestart]. That split is the whole point: the stream may be replaced without
+     * a terminal, NAT tunnel or file transfer noticing, and — because this used to be a sibling of
+     * the state stream under one non-supervising scope — without the metrics heartbeat going down
+     * with it. Real stream failures still propagate and rebuild the connection.
+     *
+     * A result already taken out of the result channel by the cancelled collector is lost when the
+     * stream is replaced. That is a task result the Dashboard will not see, accepted because the
+     * deadline only expires after minutes of total silence, which is also minutes of idle workers.
+     */
+    private suspend fun handleTaskStream(stub: NezhaServiceCoroutineStub): Unit = coroutineScope {
         val results = Channel<TaskResult>(TASK_RESULT_BUFFER_CAPACITY)
         val shortTasks = Channel<Task>(SHORT_TASK_QUEUE_CAPACITY)
         val streamSessions = createStreamSessionRegistry()
+        val sessionScope = this
         val workers = List(SHORT_TASK_WORKER_COUNT) {
             launch {
                 for (task in shortTasks) executeShortTask(task, results)
             }
         }
         try {
-            val incoming = stub.requestTask(results.receiveAsFlow())
-                .buffer(TASK_INPUT_BUFFER_CAPACITY)
-                .produceIn(this)
-            try {
-                while (isActive) {
-                    val task = DashboardSessionWatchdog.receiveWithin(
-                        incoming,
-                        DashboardSessionWatchdog.TASK_IDLE_TIMEOUT_MS,
-                        "RequestTask stream"
-                    )
-                    routeIncomingTask(stub, task, shortTasks, results, streamSessions)
+            consumeWithIdleRestart(
+                idleTimeoutMillis = DashboardSessionWatchdog.TASK_IDLE_TIMEOUT_MS,
+                streamName = "RequestTask stream",
+                openStream = {
+                    stub.requestTask(results.receiveAsFlow())
+                        .buffer(TASK_INPUT_BUFFER_CAPACITY)
+                        .produceIn(this)
+                },
+                onIdleRestart = {
+                    Logger.i("AgentRuntime: 任务流长时间空闲，仅重建任务流，连接与会话保持不变")
                 }
-            } finally {
-                incoming.cancel()
+            ) { task ->
+                routeIncomingTask(sessionScope, stub, task, shortTasks, results, streamSessions)
             }
         } finally {
             workers.forEach(Job::cancel)
@@ -375,7 +432,13 @@ internal class AgentRuntime(
         )
     )
 
-    private suspend fun CoroutineScope.routeIncomingTask(
+    /**
+     * [sessionScope] is passed explicitly rather than taken as a receiver because which scope a
+     * stream session lands in is load-bearing: it must be the one that survives a task-stream
+     * replacement, never the stream's own.
+     */
+    private suspend fun routeIncomingTask(
+        sessionScope: CoroutineScope,
         stub: NezhaServiceCoroutineStub,
         task: Task,
         shortTasks: SendChannel<Task>,
@@ -387,13 +450,22 @@ internal class AgentRuntime(
             return
         }
         if (task.type in TaskTypes.STREAM_TASKS) {
-            launchStreamTask(stub, task, results, streamSessions)
+            launchStreamTask(sessionScope, stub, task, results, streamSessions)
         } else {
             enqueueShortTaskWithBackpressure(task, shortTasks, results)
         }
     }
 
-    private suspend fun CoroutineScope.launchStreamTask(
+    /**
+     * Nothing suspends between admission and [StreamSessionLease] ownership.
+     *
+     * `tryAcquire` hands back a lease that only the completion callback can release, so a
+     * cancellation landing in a gap between the two would strip the session's slot from the
+     * registry for the lifetime of the connection. Keep the acquire, the launch and
+     * `invokeOnCompletion` free of suspension points.
+     */
+    private suspend fun launchStreamTask(
+        sessionScope: CoroutineScope,
         stub: NezhaServiceCoroutineStub,
         task: Task,
         results: SendChannel<TaskResult>,
@@ -417,9 +489,10 @@ internal class AgentRuntime(
             }
         }
         val session = when (request) {
-            is StreamTaskRequest.Terminal -> launchTerminalSession(stub, request)
-            is StreamTaskRequest.Nat -> launchNatSession(stub, request)
-            is StreamTaskRequest.FileManager -> launchFileManagerSession(stub, request)
+            is StreamTaskRequest.Terminal -> sessionScope.launchTerminalSession(stub, request)
+            is StreamTaskRequest.Nat -> sessionScope.launchNatSession(stub, request)
+            is StreamTaskRequest.FileManager ->
+                sessionScope.launchFileManagerSession(stub, request)
         }
         session.invokeOnCompletion { lease.close() }
     }
@@ -538,7 +611,7 @@ internal class AgentRuntime(
             Logger.e("AgentRuntime: 连接中断，关闭通道后重试", failure)
         }
         grpcConnection.disconnect(preserveConnectionState = true)
-        delay(DashboardSessionWatchdog.RECONNECT_BACKOFF_MS)
+        delay(reconnectBackoff.nextDelayMillis())
         runCatching { grpcConnection.connect() }
             .onFailure { Logger.e("AgentRuntime: gRPC 通道重建失败，将继续重试", it) }
     }

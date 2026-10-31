@@ -75,9 +75,6 @@ import rikka.shizuku.Shizuku
  */
 class MainActivity : ComponentActivity() {
 
-    /** Shizuku 权限请求码（任意唯一整数）。 */
-    private val SHIZUKU_REQUEST_CODE = 19527
-
     /**
      * Held at activity level so the Shizuku listener can deliver straight to it.
      *
@@ -165,6 +162,17 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         Shizuku.removeRequestPermissionResultListener(shizukuPermResultListener)
     }
+
+    companion object {
+        /**
+         * Shizuku 权限请求码（任意唯一整数）。
+         *
+         * 单一事实来源：改为编译期 `const val`（而非每实例一份的属性），供权限回调与 setContent 引用。
+         * MainScreen / ConfigScreenContent 原先各自把 19527 写进默认参数，现已删除那两个默认值——
+         * 两处都由本 Activity 显式下传，避免同一常量散落三处。
+         */
+        private const val SHIZUKU_REQUEST_CODE = 19527
+    }
 }
 
 /**
@@ -195,7 +203,7 @@ private fun UiEventHost(vm: MainViewModel) {
 @Composable
 fun MainScreen(
     vm: MainViewModel,
-    shizukuRequestCode: Int = 19527
+    shizukuRequestCode: Int
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
     val contentViewHolder = remember { mutableStateOf<View?>(null) }
@@ -249,12 +257,14 @@ private fun MainPagesHost(
     onViewReady: (View) -> Unit
 ) {
     val parentComposition = rememberCompositionContext()
+    // 这两个 state 是“外层组合 → 内嵌 ComposeView 组合”的桥梁：ComposeView 只在 factory 里创建一次，
+    // 其 setContent 捕获的正是这两个 state 对象，靠读取它们才能在旋转 / 刘海变化时把新值送进去。
+    // 写入放到 SideEffect：在组合期直接写 snapshot state 属于“组合中修改自身依赖的状态”，是
+    // Compose 明确不建议的反模式；SideEffect 在组合成功提交后才运行，正是发布这类值的时机。
     val selectedTabState = remember { mutableIntStateOf(selectedTab) }
-    selectedTabState.intValue = selectedTab
-    // Held as state so a change — rotation, a cutout coming into play — reaches the embedded
-    // composition, which is created once and would otherwise keep the first value forever.
+    SideEffect { selectedTabState.intValue = selectedTab }
     val contentPaddingState = remember { mutableStateOf(contentPadding) }
-    contentPaddingState.value = contentPadding
+    SideEffect { contentPaddingState.value = contentPadding }
 
     AndroidView(
         modifier = modifier,
@@ -270,7 +280,8 @@ private fun MainPagesHost(
                         contentPadding = contentPaddingState.value
                     )
                 }
-                onViewReady(this)
+                // onViewReady 只在 update 里回调一次（update 在首次组合后也会执行）。
+                // 该回调会写外层 state，原先 factory + update 各调一次，重复且时序脆弱。
             }
         },
         update = { view ->

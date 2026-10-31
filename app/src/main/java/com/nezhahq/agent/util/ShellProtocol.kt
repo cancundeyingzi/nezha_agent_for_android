@@ -12,8 +12,9 @@ import java.nio.charset.StandardCharsets
  * report by the same amount, and once the dashboard stops receiving them it drops the whole
  * connection. `RootShell.executeIsolated` exists for work that cannot fit in this budget.
  *
- * `ShellTimeoutBudgetTest` pins the relationship; the constant it compares against lives in
- * `:app`'s service layer, which this module must not depend on.
+ * `ShellTimeoutBudgetTest` pins the relationship. The constant it compares against —
+ * `DashboardSessionWatchdog.STATE_RECEIPT_TIMEOUT_MS` — now sits in this same package; it was moved
+ * out of the service layer because it is a plain coroutine timeout with no service semantics.
  */
 internal const val DEFAULT_SHELL_TIMEOUT_MS = 5_000L
 internal const val MAX_SHELL_OUTPUT_BYTES = 4 * 1024 * 1024

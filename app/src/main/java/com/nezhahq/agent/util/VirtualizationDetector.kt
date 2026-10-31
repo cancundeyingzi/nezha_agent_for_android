@@ -65,27 +65,6 @@ object VirtualizationDetector {
         return result
     }
 
-    /**
-     * 判断是否为虚拟化环境（便捷方法）。
-     *
-     * @return true = 虚拟化环境, false = 实体机
-     */
-    fun isVirtualized(context: Context, isRootMode: Boolean): Boolean {
-        return detect(context, isRootMode).isNotEmpty()
-    }
-
-    /**
-     * 返回 CPU 核心类型标签，用于构建 CPU 显示名称。
-     * 与原版哪吒探针 Go Agent 格式一致：
-     * - 虚拟化环境 → "Virtual"
-     * - 实体机 → "Physical"
-     *
-     * @return "Physical" 或 "Virtual"
-     */
-    fun getCpuCoreType(context: Context, isRootMode: Boolean): String {
-        return if (isVirtualized(context, isRootMode)) "Virtual" else "Physical"
-    }
-
     // ── 私有检测逻辑 ────────────────────────────────────────────────────────
 
     /**

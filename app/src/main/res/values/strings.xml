@@ -7,4 +7,17 @@
         implemented the `@agent screenshot` command.
     -->
     <string name="accessibility_desc">哪吒探针保活辅助服务：开启此服务可大幅提升探针在后台的存活率，防止系统杀后台。\n\n请注意：本服务同时为面板的「@agent screenshot」远程截图指令提供截屏能力，该指令仅在你开启了「允许面板远程执行命令」后可用。本服务不读取窗口内容，也不记录按键。</string>
+
+    <!--
+        B11 隐私披露：授予 READ_SMS 后，面板可通过「@agent sms」远程读取最近 5 条收件箱短信的发件人与正文
+        （OTP 级敏感数据），而这在面板侧仅表现为「允许远程执行命令」一个开关。截图能力已在 accessibility_desc
+        里明确披露，短信此前没有任何对应说明，故补上；本次只做告知，不改行为（独立开关留待下个大版本）。
+        请求授权前弹出的说明对话框文案：
+    -->
+    <string name="sms_permission_disclosure_title">授予短信读取权限？</string>
+    <string name="sms_permission_disclosure_message">授予后，面板可通过「@agent sms」远程读取你收件箱中最近的短信，包括发件人与正文（例如验证码等一次性密码）。此能力仅在你已开启「允许面板远程执行命令」时才可用。\n\n如果你不需要面板读取短信，请拒绝此权限；拒绝不影响其他基础功能。</string>
+    <string name="sms_permission_disclosure_confirm">仍然授予</string>
+    <string name="sms_permission_disclosure_cancel">取消</string>
+    <!-- 权限列表项中短信一行的二级说明，与上面弹窗表达同一件事。 -->
+    <string name="sms_permission_list_desc">授权后，面板可经「@agent sms」远程读取最近短信的发件人与正文，仅在已开启「允许面板远程执行命令」时可用。</string>
 </resources>

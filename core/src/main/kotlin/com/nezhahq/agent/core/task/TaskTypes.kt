@@ -28,7 +28,12 @@ object TaskTypes {
 
     val STREAM_TASKS: Set<Long> = setOf(TERMINAL, NAT, FILE_MANAGER)
 
-    fun isKnownUnsupportedOnAndroid(type: Long): Boolean = type in setOf(
+    /**
+     * Built once, like [STREAM_TASKS]. Task dispatch asks this question for every task the
+     * dashboard sends, and building the set inside the function allocated it — plus a boxed Long
+     * per entry — on each of those calls.
+     */
+    private val UNSUPPORTED_ON_ANDROID: Set<Long> = setOf(
         TERMINAL_LEGACY,
         UPGRADE,
         REPORT_HOST_INFO,
@@ -42,6 +47,8 @@ object TaskTypes {
         FS_DELETE,
         FS_TRANSFER
     )
+
+    fun isKnownUnsupportedOnAndroid(type: Long): Boolean = type in UNSUPPORTED_ON_ANDROID
 
     fun unsupportedMessage(type: Long): String =
         "Task type $type is not supported by Android Agent yet."

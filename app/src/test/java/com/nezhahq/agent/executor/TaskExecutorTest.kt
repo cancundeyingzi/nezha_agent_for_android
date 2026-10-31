@@ -73,6 +73,42 @@ class TaskExecutorTest {
     }
 
     @Test
+    fun tcpPingReportsAnUnparsableTargetInsteadOfProbingPortZero() = runBlocking {
+        // Port 0 cannot be connected to. The old parser left port at 0 for every plain-string
+        // target and reported the resulting failure as if the host were down.
+        val task = Task.newBuilder()
+            .setId(42L)
+            .setType(TaskTypes.TCP_PING)
+            .setData("example.com:0")
+            .build()
+
+        val result = TaskExecutor.executeTask(task, RemoteCapabilities())
+
+        assertFalse(result.successful)
+        assertEquals(0f, result.delay, 0f)
+        assertTrue("the dashboard needs a diagnostic, not a blank failure", result.data.isNotEmpty())
+    }
+
+    @Test
+    fun tcpPingTargetNeverReachesTheLog() = runBlocking {
+        // Unbracketed IPv6 is rejected, which is the cheapest way to reach the failure path without
+        // opening a socket.
+        val task = Task.newBuilder()
+            .setId(4242L)
+            .setType(TaskTypes.TCP_PING)
+            .setData("2001:db8::1")
+            .build()
+
+        TaskExecutor.executeTask(task, RemoteCapabilities())
+
+        assertTrue(silentLogger.messages.any { it.contains("TaskID=4242") })
+        assertTrue(
+            "a probe target can name an internal host; the log view and logcat are both readable",
+            silentLogger.messages.none { it.contains("2001:db8") }
+        )
+    }
+
+    @Test
     fun streamTaskConstantsPreserveExistingRouting() {
         assertTrue(TaskTypes.TERMINAL in TaskTypes.STREAM_TASKS)
         assertTrue(TaskTypes.NAT in TaskTypes.STREAM_TASKS)

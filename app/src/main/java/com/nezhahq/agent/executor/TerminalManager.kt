@@ -15,7 +15,6 @@ import proto.NezhaServiceGrpcKt.NezhaServiceCoroutineStub
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.concurrent.atomic.AtomicBoolean
-import org.json.JSONObject
 
 /**
  * IOStream 终端会话管理器（符合 Nezha V1 协议）。
@@ -40,16 +39,12 @@ class TerminalManager(
 ) {
     private companion object {
         const val PROMPT = "nezha:/ $ "
-        const val AGENT_CMD_PREFIX = "@agent "
-        const val AGENT_CMD_EXACT = "@agent"
         const val MAX_COMMAND_LENGTH = 8 * 1024
         const val SHELL_INPUT_BUFFER_CAPACITY = 8
         const val OUTPUT_BUFFER_CAPACITY = 16
         /** IOStream StreamID 魔术头（协议规定） */
         val STREAM_MAGIC = byteArrayOf(0xFF.toByte(), 0x05, 0xFF.toByte(), 0x05)
     }
-
-    private enum class InputState { NORMAL, ESC, CSI }
 
     @Volatile private var process: Process? = null
     @Volatile private var privilegedProcess: RootShell.ManagedProcess? = null
@@ -58,9 +53,7 @@ class TerminalManager(
     private val outputChannel = Channel<Nezha.IOStreamData>(OUTPUT_BUFFER_CAPACITY)
     private val commandHandler = AgentCommandHandler(context)
     private val closed = AtomicBoolean(false)
-    private val lineBuffer = StringBuilder()
-    private var lineOverflowed = false
-    private var inputState = InputState.NORMAL
+    private val lineDiscipline = LineDiscipline(PROMPT, MAX_COMMAND_LENGTH)
     private val awaitingPrompt = AtomicBoolean(false)
 
     /**
@@ -174,98 +167,38 @@ class TerminalManager(
     // 内置行纪律 (Line Discipline)
     // ══════════════════════════════════════════════════════════════════════════
 
+    /**
+     * 逐字节喂给 [LineDiscipline]，并立刻执行它给出的副作用。
+     *
+     * 刻意保持"一个字节 → 执行该字节的全部副作用 → 下一个字节"的顺序，而不是先把整段
+     * 输入解析完再统一执行：[LineDisciplineEffect.AwaitPrompt] 会改变 [awaitingPrompt]，
+     * 而同一段输入里紧随其后的 Ctrl+C 要读到改动后的值（例如 `ls\r` + `0x03`）。
+     */
     private suspend fun handleInput(data: ByteArray) {
         if (closed.get()) return
         for (byte in data) {
-            val b = byte.toInt() and 0xFF
-            when (inputState) {
-                InputState.ESC -> {
-                    inputState = if (b == 0x5B) InputState.CSI else InputState.NORMAL
-                }
-                InputState.CSI -> {
-                    if (b in 0x40..0x7E) inputState = InputState.NORMAL
-                }
-                InputState.NORMAL -> when (b) {
-                    0x1B -> inputState = InputState.ESC
-                    0x0D -> { // Enter
-                        handleEnter()
-                    }
-                    0x0A -> { /* 忽略 LF（CR+LF 场景） */ }
-                    0x7F, 0x08 -> { // Backspace
-                        if (lineBuffer.isNotEmpty()) {
-                            lineBuffer.deleteCharAt(lineBuffer.length - 1)
-                            sendOutput("\b \b")
-                        }
-                    }
-                    0x03 -> { // Ctrl+C
-                        lineBuffer.clear()
-                        lineOverflowed = false
-                        sendOutput("^C\r\n")
-                        if (awaitingPrompt.get()) {
-                            writeToShell(byteArrayOf(0x03))
-                        } else {
-                            sendOutput(PROMPT)
-                        }
-                    }
-                    0x15 -> { // Ctrl+U
-                        if (lineBuffer.isNotEmpty()) {
-                            sendOutput("\b \b".repeat(lineBuffer.length))
-                            lineBuffer.clear()
-                        }
-                        lineOverflowed = false
-                    }
-                    0x04 -> { // Ctrl+D
-                        if (lineBuffer.isEmpty()) {
-                            sendOutput("\r\n[使用 exit 命令退出]\r\n")
-                            sendOutput(PROMPT)
-                        }
-                    }
-                    in 0x20..0x7E -> { // 可打印 ASCII
-                        appendPrintableInput(byte)
-                    }
-                }
+            for (effect in lineDiscipline.onByte(byte)) {
+                applyEffect(effect)
             }
         }
     }
 
-    private suspend fun handleEnter() {
-        sendOutput("\r\n")
-        if (lineOverflowed) {
-            lineBuffer.clear()
-            lineOverflowed = false
-            sendOutput("[Command rejected: maximum length is $MAX_COMMAND_LENGTH characters]\r\n")
-            sendOutput(PROMPT)
-            return
-        }
-
-        val command = lineBuffer.toString().trim()
-        lineBuffer.clear()
-        when {
-            command.startsWith(AGENT_CMD_PREFIX) || command == AGENT_CMD_EXACT -> {
-                handleAgentCommand(command)
-                sendOutput(PROMPT)
-            }
-            command.isNotEmpty() -> {
-                awaitingPrompt.set(true)
-                writeToShell((command + "\n").toByteArray())
-            }
-            else -> sendOutput(PROMPT)
+    private suspend fun applyEffect(effect: LineDisciplineEffect) {
+        when (effect) {
+            is LineDisciplineEffect.Echo -> sendOutput(effect.text)
+            is LineDisciplineEffect.SendToShell -> writeToShell(effect.text.toByteArray())
+            is LineDisciplineEffect.RunAgentCommand -> handleAgentCommand(effect.subcommand)
+            LineDisciplineEffect.AwaitPrompt -> awaitingPrompt.set(true)
+            LineDisciplineEffect.SendInterrupt -> writeToShell(byteArrayOf(0x03))
+            // awaitingPrompt 在这里才读取，与改造前"先回显 ^C 再判断"的时序一致
+            LineDisciplineEffect.Interrupt ->
+                applyEffect(lineDiscipline.resolveInterrupt(awaitingPrompt.get()))
         }
     }
 
-    private suspend fun appendPrintableInput(byte: Byte) {
-        if (lineBuffer.length >= MAX_COMMAND_LENGTH) {
-            lineOverflowed = true
-            return
-        }
-        lineBuffer.append(byte.toInt().toChar())
-        sendOutput(byteArrayOf(byte))
-    }
-
-    private suspend fun handleAgentCommand(line: String) {
-        val cmd = if (line == AGENT_CMD_EXACT) "" else line.removePrefix(AGENT_CMD_PREFIX).trim()
+    private suspend fun handleAgentCommand(subcommand: String) {
         try {
-            sendOutput(commandHandler.execute(cmd))
+            sendOutput(commandHandler.execute(subcommand))
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (e: Exception) {
@@ -344,51 +277,6 @@ class TerminalManager(
         }
     }
 
-    /**
-     * 模拟 PTY 的 ONLCR（Output NL-CR）行为：
-     * 将 Shell 输出中孤立的 \n (0x0A) 翻译为 \r\n (0x0D 0x0A)。
-     *
-     * ## 为什么需要这个？
-     * 真正的伪终端（PTY）内核驱动会自动做这个翻译（termios OPOST+ONLCR 标志），
-     * 但我们使用的是 ProcessBuilder 的原始管道（非 PTY），Shell 输出的 \n 不会
-     * 自动变成 \r\n。xterm.js 等终端模拟器收到孤立的 \n 后只执行"光标下移"，
-     * 不回到行首，导致命令输出呈"阶梯状"。
-     *
-     * ## 翻译规则
-     * - `\n` 前面没有 `\r` → 插入 `\r` 变成 `\r\n`
-     * - `\r\n` 已经存在 → 保持不变，不做重复翻译
-     *
-     * @param data   原始字节缓冲区
-     * @param length 有效字节数
-     * @return 翻译后的字节数组
-     */
-    private fun translateLfToCrlf(data: ByteArray, length: Int): ByteArray {
-        // 快速路径：先扫描是否有需要翻译的孤立 \n，没有则直接返回原数据的拷贝
-        var needsTranslation = false
-        for (i in 0 until length) {
-            if (data[i] == 0x0A.toByte()) {
-                if (i == 0 || data[i - 1] != 0x0D.toByte()) {
-                    needsTranslation = true
-                    break
-                }
-            }
-        }
-        if (!needsTranslation) return data.copyOf(length)
-
-        // 需要翻译：最坏情况每个字节都是 \n，输出长度翻倍
-        val out = ByteArray(length * 2)
-        var pos = 0
-        for (i in 0 until length) {
-            val b = data[i]
-            if (b == 0x0A.toByte() && (i == 0 || data[i - 1] != 0x0D.toByte())) {
-                // 孤立的 \n → 插入 \r\n
-                out[pos++] = 0x0D.toByte()
-            }
-            out[pos++] = b
-        }
-        return out.copyOf(pos)
-    }
-
     /** 协议心跳：每 30 秒发送空数据包保持连接。 */
     private suspend fun keepAliveLoop() {
         try {
@@ -463,4 +351,244 @@ class TerminalManager(
             throw e
         } catch (_: Exception) {}
     }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 行纪律：纯逻辑部分
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * 行纪律对外部产生的副作用。
+ *
+ * 把"决定做什么"与"怎么做"分开，是为了让状态机能在没有 gRPC 流、没有 Shell 子进程、
+ * 也没有 Android 运行时的情况下被直接断言。
+ */
+internal sealed interface LineDisciplineEffect {
+    /** 回显到终端。 */
+    data class Echo(val text: String) : LineDisciplineEffect
+
+    /** 把一行命令写入 Shell stdin（[text] 已含结尾换行）。 */
+    data class SendToShell(val text: String) : LineDisciplineEffect
+
+    /** 执行 `@agent` 虚拟指令；[subcommand] 是已经剥掉前缀的部分。 */
+    data class RunAgentCommand(val subcommand: String) : LineDisciplineEffect
+
+    /** 标记"已经把命令交给 Shell，正在等它的提示符"。 */
+    data object AwaitPrompt : LineDisciplineEffect
+
+    /** 向 Shell 转发 Ctrl+C（0x03）。 */
+    data object SendInterrupt : LineDisciplineEffect
+
+    /**
+     * Ctrl+C，去向未定。
+     *
+     * 结果取决于运行时的 awaitingPrompt，而它由读取 Shell 输出的协程并发改写，
+     * 所以必须在执行副作用时才读取，交给 [LineDiscipline.resolveInterrupt] 解析。
+     */
+    data object Interrupt : LineDisciplineEffect
+}
+
+/**
+ * 终端行纪律状态机（纯逻辑，无 IO、无 Android 依赖）。
+ *
+ * Android 无法分配 PTY（需 JNI），所以回显、退格、Ctrl+C/U/D、ESC 序列过滤这些本该由
+ * 内核 termios 完成的事都得自己做。这里只负责"输入字节 → 该产生哪些副作用"，
+ * 副作用由 [TerminalManager] 执行。
+ *
+ * @param prompt            命令提示符，需要重画提示符的分支会原样回显它
+ * @param maxCommandLength  单行命令的字符上限；超出后整行作废（见 [onEnter]）
+ */
+internal class LineDiscipline(
+    private val prompt: String,
+    private val maxCommandLength: Int
+) {
+    private companion object {
+        const val AGENT_CMD_PREFIX = "@agent "
+        const val AGENT_CMD_EXACT = "@agent"
+    }
+
+    /** ESC 序列的解析阶段：ESC 之后可能跟 `[`（CSI），CSI 以 0x40..0x7E 收尾。 */
+    private enum class InputState { NORMAL, ESC, CSI }
+
+    private val lineBuffer = StringBuilder()
+    private var inputState = InputState.NORMAL
+
+    /**
+     * 本行是否已经超长。
+     *
+     * 超长后剩余字符被静默丢弃，直到 Enter 才整行拒绝——不能一超长就报错，
+     * 否则用户粘贴一大段文本时会收到一串重复错误。
+     */
+    private var lineOverflowed = false
+
+    /** 当前行缓冲内容，供测试与诊断观察。 */
+    val currentLine: String get() = lineBuffer.toString()
+
+    fun onByte(byte: Byte): List<LineDisciplineEffect> {
+        val b = byte.toInt() and 0xFF
+        return when (inputState) {
+            // ESC / CSI 序列（方向键、功能键等）整段吞掉：没有 PTY，光标移动无从实现，
+            // 放行只会把控制字符混进命令行
+            InputState.ESC -> {
+                inputState = if (b == 0x5B) InputState.CSI else InputState.NORMAL
+                emptyList()
+            }
+
+            InputState.CSI -> {
+                if (b in 0x40..0x7E) inputState = InputState.NORMAL
+                emptyList()
+            }
+
+            InputState.NORMAL -> onNormalByte(b)
+        }
+    }
+
+    /** Ctrl+C 的去向：Shell 正在跑命令就转发过去，否则本地重画提示符。 */
+    fun resolveInterrupt(awaitingPrompt: Boolean): LineDisciplineEffect =
+        if (awaitingPrompt) {
+            LineDisciplineEffect.SendInterrupt
+        } else {
+            LineDisciplineEffect.Echo(prompt)
+        }
+
+    private fun onNormalByte(b: Int): List<LineDisciplineEffect> = when (b) {
+        0x1B -> {
+            inputState = InputState.ESC
+            emptyList()
+        }
+
+        0x0D -> onEnter()
+
+        0x0A -> emptyList() // 忽略 LF（CR+LF 场景）
+
+        0x7F, 0x08 -> if (lineBuffer.isEmpty()) {
+            // 空缓冲时不回退，否则退格会擦掉提示符本身
+            emptyList()
+        } else {
+            lineBuffer.deleteCharAt(lineBuffer.length - 1)
+            listOf(LineDisciplineEffect.Echo("\b \b"))
+        }
+
+        0x03 -> { // Ctrl+C
+            lineBuffer.clear()
+            lineOverflowed = false
+            listOf(LineDisciplineEffect.Echo("^C\r\n"), LineDisciplineEffect.Interrupt)
+        }
+
+        0x15 -> { // Ctrl+U：清空整行
+            val effects: List<LineDisciplineEffect> = if (lineBuffer.isEmpty()) {
+                emptyList()
+            } else {
+                // repeat 必须在 clear 之前求值
+                listOf(LineDisciplineEffect.Echo("\b \b".repeat(lineBuffer.length)))
+                    .also { lineBuffer.clear() }
+            }
+            lineOverflowed = false
+            effects
+        }
+
+        0x04 -> if (lineBuffer.isEmpty()) { // Ctrl+D
+            listOf(
+                LineDisciplineEffect.Echo("\r\n[使用 exit 命令退出]\r\n"),
+                LineDisciplineEffect.Echo(prompt)
+            )
+        } else {
+            emptyList()
+        }
+
+        in 0x20..0x7E -> if (lineBuffer.length >= maxCommandLength) {
+            lineOverflowed = true
+            emptyList()
+        } else {
+            lineBuffer.append(b.toChar())
+            // 0x20..0x7E 的 UTF-8 编码就是它本身，回显字符与回显原字节等价
+            listOf(LineDisciplineEffect.Echo(b.toChar().toString()))
+        }
+
+        else -> emptyList()
+    }
+
+    private fun onEnter(): List<LineDisciplineEffect> {
+        if (lineOverflowed) {
+            lineBuffer.clear()
+            lineOverflowed = false
+            return listOf(
+                LineDisciplineEffect.Echo("\r\n"),
+                LineDisciplineEffect.Echo(
+                    "[Command rejected: maximum length is $maxCommandLength characters]\r\n"
+                ),
+                LineDisciplineEffect.Echo(prompt)
+            )
+        }
+
+        val command = lineBuffer.toString().trim()
+        lineBuffer.clear()
+        return when {
+            command.startsWith(AGENT_CMD_PREFIX) || command == AGENT_CMD_EXACT -> listOf(
+                LineDisciplineEffect.Echo("\r\n"),
+                LineDisciplineEffect.RunAgentCommand(agentSubcommand(command)),
+                LineDisciplineEffect.Echo(prompt)
+            )
+
+            // 提示符由读取 Shell 输出的协程在命令结束后补上，这里不画
+            command.isNotEmpty() -> listOf(
+                LineDisciplineEffect.Echo("\r\n"),
+                LineDisciplineEffect.AwaitPrompt,
+                LineDisciplineEffect.SendToShell(command + "\n")
+            )
+
+            else -> listOf(
+                LineDisciplineEffect.Echo("\r\n"),
+                LineDisciplineEffect.Echo(prompt)
+            )
+        }
+    }
+
+    private fun agentSubcommand(command: String): String =
+        if (command == AGENT_CMD_EXACT) "" else command.removePrefix(AGENT_CMD_PREFIX).trim()
+}
+
+/**
+ * 模拟 PTY 的 ONLCR（Output NL-CR）行为：
+ * 将 Shell 输出中孤立的 \n (0x0A) 翻译为 \r\n (0x0D 0x0A)。
+ *
+ * ## 为什么需要这个？
+ * 真正的伪终端（PTY）内核驱动会自动做这个翻译（termios OPOST+ONLCR 标志），
+ * 但我们使用的是 ProcessBuilder 的原始管道（非 PTY），Shell 输出的 \n 不会
+ * 自动变成 \r\n。xterm.js 等终端模拟器收到孤立的 \n 后只执行"光标下移"，
+ * 不回到行首，导致命令输出呈"阶梯状"。
+ *
+ * ## 翻译规则
+ * - `\n` 前面没有 `\r` → 插入 `\r` 变成 `\r\n`
+ * - `\r\n` 已经存在 → 保持不变，不做重复翻译
+ *
+ * @param data   原始字节缓冲区
+ * @param length 有效字节数
+ * @return 翻译后的字节数组
+ */
+internal fun translateLfToCrlf(data: ByteArray, length: Int): ByteArray {
+    // 快速路径：先扫描是否有需要翻译的孤立 \n，没有则直接返回原数据的拷贝
+    var needsTranslation = false
+    for (i in 0 until length) {
+        if (data[i] == 0x0A.toByte()) {
+            if (i == 0 || data[i - 1] != 0x0D.toByte()) {
+                needsTranslation = true
+                break
+            }
+        }
+    }
+    if (!needsTranslation) return data.copyOf(length)
+
+    // 需要翻译：最坏情况每个字节都是 \n，输出长度翻倍
+    val out = ByteArray(length * 2)
+    var pos = 0
+    for (i in 0 until length) {
+        val b = data[i]
+        if (b == 0x0A.toByte() && (i == 0 || data[i - 1] != 0x0D.toByte())) {
+            // 孤立的 \n → 插入 \r\n
+            out[pos++] = 0x0D.toByte()
+        }
+        out[pos++] = b
+    }
+    return out.copyOf(pos)
 }

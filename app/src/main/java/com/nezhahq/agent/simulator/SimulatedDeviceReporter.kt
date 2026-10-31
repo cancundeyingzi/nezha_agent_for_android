@@ -4,7 +4,7 @@ import com.nezhahq.agent.core.model.SimulatedDeviceConfig
 
 import com.nezhahq.agent.grpc.GrpcChannelFactory
 import com.nezhahq.agent.grpc.GrpcTransportMode
-import com.nezhahq.agent.service.DashboardSessionWatchdog
+import com.nezhahq.agent.util.DashboardSessionWatchdog
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import proto.NezhaServiceGrpcKt.NezhaServiceCoroutineStub

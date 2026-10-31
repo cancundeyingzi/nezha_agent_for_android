@@ -12,11 +12,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.filled.Build
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -32,14 +31,14 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.nezhahq.agent.grpc.GrpcConnectionState
 import com.nezhahq.agent.core.config.StorageStatus
-import rikka.shizuku.Shizuku
+import com.nezhahq.agent.util.Logger
 import com.nezhahq.agent.MainViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConfigScreenContent(
     vm: MainViewModel,
-    shizukuRequestCode: Int = 19527,
+    shizukuRequestCode: Int,
     contentPadding: PaddingValues = PaddingValues()
 ) {
     val context = LocalContext.current
@@ -47,6 +46,12 @@ fun ConfigScreenContent(
 
     // ── gRPC 连接状态收集 ──
     val grpcState by vm.grpcConnectionState.collectAsState()
+
+    // 首次配置从存储异步加载完成前为 true，完成后永久为 false（见 MainViewModel.isConfigLoading）。
+    // 加载期间禁止编辑连接字段与“启动探针”：否则用户可能在字段被填充前就点启动，拿到一份空配置。
+    val configLoading = vm.isConfigLoading
+    // 连接字段的可用性：既要没有写入进行中，也要首次加载已完成。
+    val fieldsEnabled = !vm.isConfigWriteInProgress && !configLoading
 
     // ── 通知权限 Launcher（异步时序安全） ──
     var pendingServiceLaunch by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -85,6 +90,31 @@ fun ConfigScreenContent(
                 "哪吒探针",
                 style = MaterialTheme.typography.headlineMedium
             )
+        }
+
+        // ── 首次配置加载提示 ──
+        // 明确告知用户：输入框与“启动探针”暂时禁用，是因为正在从存储读取已保存的配置。
+        if (configLoading) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(SmoothCornerShape(16.dp))
+                    .background(LgWarning.copy(alpha = 0.08f))
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                    color = LgPrimary
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(
+                    "正在加载已保存的配置，请稍候…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = LgWarning
+                )
+            }
         }
 
         if (!vm.isConfigStorageAvailable) {
@@ -182,7 +212,8 @@ fun ConfigScreenContent(
                 GlassButtonPrimary(
                     onClick = { vm.parseClipboardConfig() },
                     modifier = Modifier.weight(1f),
-                    enabled = !vm.isConfigWriteInProgress
+                    // 粘贴会写入连接字段，故与字段同受加载态约束。
+                    enabled = fieldsEnabled
                 ) {
                     Text("粘贴命令", fontWeight = FontWeight.Bold)
                 }
@@ -212,7 +243,7 @@ fun ConfigScreenContent(
             ) {
                 GlassButtonPrimary(
                     onClick = {
-                        val notifGranted = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                        val notifGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                             ContextCompat.checkSelfPermission(
                                 context, Manifest.permission.POST_NOTIFICATIONS
                             ) == PackageManager.PERMISSION_GRANTED
@@ -227,7 +258,8 @@ fun ConfigScreenContent(
                         )
                     },
                     modifier = Modifier.weight(1f),
-                    enabled = vm.canEditConfig
+                    // 加载未完成时禁止启动，避免用空配置启动探针。
+                    enabled = vm.canEditConfig && !configLoading
                 ) {
                     Text("启动探针", fontWeight = FontWeight.Bold)
                 }
@@ -255,25 +287,25 @@ fun ConfigScreenContent(
             EtherTextField(
                 value = vm.server, onValueChange = { vm.server = it },
                 label = "服务端 IP 或域名", modifier = Modifier.fillMaxWidth(),
-                enabled = !vm.isConfigWriteInProgress
+                enabled = fieldsEnabled
             )
             Spacer(modifier = Modifier.height(12.dp))
             EtherTextField(
                 value = vm.port, onValueChange = { vm.port = it },
                 label = "gRPC 端口 (例如 8008)", modifier = Modifier.fillMaxWidth(),
-                enabled = !vm.isConfigWriteInProgress
+                enabled = fieldsEnabled
             )
             Spacer(modifier = Modifier.height(12.dp))
             EtherTextField(
                 value = vm.secret, onValueChange = { vm.secret = it },
                 label = "客户端密钥 (Secret)", modifier = Modifier.fillMaxWidth(),
-                enabled = !vm.isConfigWriteInProgress
+                enabled = fieldsEnabled
             )
             Spacer(modifier = Modifier.height(12.dp))
             EtherTextField(
                 value = vm.uuid, onValueChange = { vm.uuid = it },
                 label = "客户端标识 (UUID)", modifier = Modifier.fillMaxWidth(),
-                enabled = !vm.isConfigWriteInProgress
+                enabled = fieldsEnabled
             )
             Spacer(modifier = Modifier.height(12.dp))
             EtherToggleRow(
@@ -282,7 +314,7 @@ fun ConfigScreenContent(
                 title = "使用 TLS 加密连接",
                 description = "关闭后将使用明文传输，仅适用于可信内网部署（需重启服务生效）",
                 highlightWhenChecked = false,
-                enabled = !vm.isConfigWriteInProgress
+                enabled = fieldsEnabled
             )
             if (!vm.useTls) {
                 Text(
@@ -409,7 +441,7 @@ fun ConfigScreenContent(
         }
 
         // ── 日志实时预览窗 ──
-        val logs by com.nezhahq.agent.util.Logger.logs.collectAsState()
+        val logs by Logger.logs.collectAsState()
 
         Column(modifier = Modifier.fillMaxWidth()) {
             Row(
@@ -434,7 +466,7 @@ fun ConfigScreenContent(
                             context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         val clip = ClipData.newPlainText(
                             "logs",
-                            com.nezhahq.agent.util.Logger.getLogString()
+                            Logger.getLogString()
                         )
                         clipboard.setPrimaryClip(clip)
                         Toast.makeText(context, "日志已复制到剪贴板", Toast.LENGTH_SHORT).show()
@@ -462,23 +494,27 @@ fun ConfigScreenContent(
             ) {
                 // 使用 LazyColumn 局部刷新日志列表，避免全量字符串拼接和全量重绘。
                 val lazyListState = rememberLazyListState()
-                LaunchedEffect(logs.size) {
+                // 滚动到底不能只看 size：Logger 去重命中时只改最后一条的文本、size 不变，
+                // 以 size 为 key 便不会滚到底。改为对“最后一条日志”敏感——LogEntry 是 data class，
+                // 无论新增（新 id）还是去重更新（同 id、文本追加 ×N），lastOrNull() 都会不相等而重触发。
+                val lastEntry = logs.lastOrNull()
+                LaunchedEffect(lastEntry) {
                     if (logs.isNotEmpty()) {
-                        lazyListState.animateScrollToItem(logs.size - 1)
+                        lazyListState.animateScrollToItem(logs.lastIndex)
                     }
                 }
                 LazyColumn(
                     state = lazyListState,
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    // 使用 itemsIndexed 以索引为 key，
-                    // 避免 indexOf 在存在重复日志时返回错误索引的问题
-                    itemsIndexed(
+                    // 以 LogEntry.id 作为稳定且唯一的 key：缓冲区满后 removeAt(0) 让下标整体前移时，
+                    // 各条 id 不变，Compose 才能识别“同一条只是位置移动”，避免整列全量重绘。
+                    items(
                         items = logs,
-                        key = { index, _ -> index }
-                    ) { _, logLine ->
+                        key = { it.id }
+                    ) { entry ->
                         Text(
-                            text = logLine,
+                            text = entry.text,
                             color = LgCyan400.copy(alpha = 0.8f),
                             fontFamily = FontFamily.Monospace,
                             fontSize = 11.sp,
