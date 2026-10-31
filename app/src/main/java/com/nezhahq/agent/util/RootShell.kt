@@ -111,11 +111,12 @@ object RootShell {
      */
     fun execute(command: String, timeoutMs: Long = DEFAULT_SHELL_TIMEOUT_MS): String {
         if (!accessController.isEnabled()) return ""
-        if (persistentShell.sessionType() == "shizuku" && !isShizukuAvailable()) {
-            closePrivilegedResources()
+        val shell = persistentShell
+        if (shell.sessionType() == "shizuku" && !isShizukuAvailable()) {
+            closePrivilegedResources(shell)
             return ""
         }
-        return persistentShell.execute(command, timeoutMs)
+        return shell.execute(command, timeoutMs)
     }
 
     /**
@@ -358,14 +359,17 @@ object RootShell {
         }
     }
 
-    private fun closePrivilegedResources() {
-        val detached = synchronized(authorizationLifecycleLock) { detachLegacyResources() }
-        detached.close()
+    private fun closePrivilegedResources(expectedShell: PersistentShell) {
+        val detached = synchronized(authorizationLifecycleLock) {
+            if (persistentShell === expectedShell) detachLegacyResources() else null
+        }
+        detached?.close()
     }
 
     /** Caller holds only the lifecycle lock. Snapshot construction does no IO or callbacks. */
     private fun detachLegacyResources(): LegacyResources {
         val shell = persistentShell
+        shell.retire()
         persistentShell = newPersistentShell()
         val processes = synchronized(managedProcessLock) {
             managedProcesses.toList().also { managedProcesses.clear() }
