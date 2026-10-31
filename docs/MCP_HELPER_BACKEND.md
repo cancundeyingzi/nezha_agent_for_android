@@ -89,7 +89,7 @@ timeout 默认 30 s，最大 300 s；使用单调时钟。父端整体 deadline 
 
 普通 lease 接受握手时同时记录有界 `/proc/$pid/stat` 的 PID/pgrp/sid/starttime 和 proc 目录 UID。收尾先调用 API 23 已公开的 `Process.exitValue()`：已退出时绝不再对缓存 PID 发组信号或 destroy。仍活跃时重新核对 UID、PID、pgrp、sid、starttime 与非僵尸状态，紧邻 `Os.kill(-pid, SIGKILL)` 前再检查一次退出状态。若进程已退出、身份变化或状态不可验证，只异步关闭原有控制/输出管道，避免把旧整数 PID 当成当前所有权。活跃但不能安全复核/发信号时，由原控制 EOF 和独立 watchdog 驱动 helper 自清理，不通过 destroy 提前杀死已接受请求的 helper。
 
-`close()` 不等待 BufferedOutputStream flush、写锁或管道关闭。组信号之后，三路管道关闭，以及尚未接受任何请求时可能伴随关闭管道的 `Process.destroy()`，都交给专用清理池。ticket 一直保留到三路关闭尝试完成；被写锁卡住的任务持续占用容量，容量耗尽时后续启动 busy，不会随着取消/重连无限积压线程、关闭任务或进程。清理调度异常也不提前释放 ticket。进程正常自杀或独立 watchdog 终止后会让原生管道解除阻塞，清理完成后再恢复容量。
+`close()` 不等待 BufferedOutputStream flush、写锁或管道关闭。组信号之后，三路管道关闭，以及尚未接受任何请求时可能伴随关闭管道的 `Process.destroy()`，都交给专用清理池。ticket 一直保留到三路管道均成功关闭，且原 `Process.exitValue()` 已确认退出；发送 SIGKILL、控制 EOF 或解除写锁本身均不是退出证明。清理 worker 对原 `Process` 每 10 ms 重查，最多等待 250 ms；等待到期、状态未知或线程中断均继续保票。每路 getter 和关闭只尝试一次，阻塞或失败持续占用同一资源票；状态仍活跃或未知时保留该票，满槽的后续启动只重新检查既有 `Process.exitValue()`，不发起新进程、PID 探测或信号。容量耗尽时后续启动 busy，不会随着取消/重连无限积压线程、关闭任务或进程；清理调度异常也不提前释放 ticket。
 
 API 23 没有这里可用的公开 pidfd 原子进程句柄；`exitValue`、proc 启动标识复核与信号之间仍存在检查间隙。这些保护避免对长时间预算等待后已退出的 helper 盲发旧 PGID，不宣称检查与信号已经原子化。DEV06 也必须保持活跃身份的有效性，不能无条件重用缓存数值 PGID。
 

@@ -3,6 +3,7 @@ package com.nezhahq.agent.mcp.transport
 import com.nezhahq.agent.core.mcp.McpBusinessError
 import com.nezhahq.agent.core.mcp.McpErrorCode
 import com.nezhahq.agent.mcp.helper.HelperSessionIdentity
+import java.util.concurrent.TimeUnit
 
 /** A process start token is checked again before signaling a numeric process-group ID. */
 internal data class ApplicationProcessIdentity(val uid: Int, val stat: HelperSessionIdentity.Snapshot) {
@@ -75,10 +76,9 @@ internal class ApplicationHelperLease private constructor(
         } finally {
             // Process pipes may flush or wait for a concurrent REQUEST writer's monitor. Never
             // perform that work on the cancelled coroutine. The pre-launch ticket bounds native
-            // processes and retains this cleanup ownership until every close attempt has finished.
-            cleanupTicket.schedule {
+            // resource bundles until their pipes close and the original Process proves exit.
+            scheduleCleanup(process, cleanupTicket) {
                 if (registered == null && running()) runCatching { process.destroy() }
-                closePipes(process)
             }
         }
     }
@@ -93,6 +93,9 @@ internal class ApplicationHelperLease private constructor(
     ))
 
     companion object {
+        private const val CLEANUP_EXIT_WAIT_MS = 250L
+        private const val CLEANUP_EXIT_POLL_MS = 10L
+
         fun start(
             expectedUid: Int,
             control: ApplicationProcessControl,
@@ -108,18 +111,57 @@ internal class ApplicationHelperLease private constructor(
                 return ApplicationHelperLease(process, expectedUid, control, ticket)
             } catch (failure: Throwable) {
                 val started = process
-                if (started == null) ticket.releaseUnused() else ticket.schedule {
+                if (started == null) ticket.releaseUnused() else scheduleCleanup(started, ticket) {
                     runCatching { started.destroy() }
-                    closePipes(started)
                 }
                 throw failure
             }
         }
 
-        private fun closePipes(process: Process) {
-            runCatching { process.outputStream.close() }
-            runCatching { process.inputStream.close() }
-            runCatching { process.errorStream.close() }
+        private fun scheduleCleanup(process: Process, ticket: HelperProcessCleanup.Ticket, beforeClose: () -> Unit) {
+            var pipesClosed: Boolean? = null
+            ticket.scheduleUntil {
+                if (pipesClosed == null) {
+                    beforeClose()
+                    // Keep the same owner on retries. A close may block on a writer, and neither
+                    // stream getters nor close attempts may be repeated by admission pressure.
+                    pipesClosed = closePipes(process)
+                }
+                // Sending SIGKILL or control EOF is not proof of exit. exitValue is nonblocking
+                // on API 23 and stays bound to this Process even if its old numeric PID is reused.
+                val exited = awaitExit(process)
+                pipesClosed == true && exited
+            }
+        }
+
+        private fun awaitExit(process: Process): Boolean {
+            val until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CLEANUP_EXIT_WAIT_MS)
+            while (!Thread.currentThread().isInterrupted) {
+                try {
+                    process.exitValue()
+                    return true
+                } catch (_: IllegalThreadStateException) {
+                    // The native reaper may publish an otherwise completed kill shortly later.
+                } catch (_: Exception) {
+                    return false
+                }
+                val remaining = until - System.nanoTime()
+                if (remaining <= 0) return false
+                try {
+                    TimeUnit.NANOSECONDS.sleep(minOf(remaining, TimeUnit.MILLISECONDS.toNanos(CLEANUP_EXIT_POLL_MS)))
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return false
+                }
+            }
+            return false
+        }
+
+        private fun closePipes(process: Process): Boolean {
+            val controlClosed = runCatching { process.outputStream.close() }.isSuccess
+            val outputClosed = runCatching { process.inputStream.close() }.isSuccess
+            val errorClosed = runCatching { process.errorStream.close() }.isSuccess
+            return controlClosed && outputClosed && errorClosed
         }
     }
 }
