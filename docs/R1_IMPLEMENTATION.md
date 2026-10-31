@@ -175,3 +175,7 @@ API26+ 的 FsList 使用已打开目录 fd 的 `/proc/self/fd` 锚定路径进�
 - 最新代码在 API36 / 16 KiB 页 / 4 GiB 隔离模拟器的完整 100 轮同进程真实重建/取消通过：同 PID3674，连接 FD94–95，最终93；PSS 首94591 KiB、末96253 KiB、停止96173 KiB。每轮原生票0、旧组退出、无旧结果重放，临时令牌已撤销。
 - 安装广播后的 Google 组件更新曾在 2 GiB 测试机触发系统 LMK；通过日志确认不是 App 异常堆栈，最终回归使用 4 GiB。结论不包含真机低内存、24 小时后台或原签名覆盖安装。
 - 交付和验收范围见 [R1_BUILD.md](R1_BUILD.md)、[R1_VALIDATION.md](R1_VALIDATION.md)、[R1_MANUAL_TEST.md](R1_MANUAL_TEST.md)。
+
+## Android17 实机低风险补充
+
+2026-10-31，用户授权通过哪吒 MCP 测试手机并禁止高危内容。节点31为 Android17 / SDK37 / ARM64，版本 A0.11.0-r1；UID0 执行、argv/stdin/双输出/exit7/环境隔离、公开系统目录与分段读取、协议段摘要、EOF/错误路径、2秒短超时及 GPU 双字段通过。没有写删文件、修改权限配置、重启或压力负载。锁屏/网络切换期间曾离线，之后恢复上报和 UID0 命令，原 App PID仍在；网络恢复可用时刻未知，不宣称重连耗时或长期纯后台验收通过。Android15 未在本次可见 Android 节点中。详情见 [实机记录](R1_PHONE_TEST_ANDROID17_2026-10-31.md)。

@@ -57,9 +57,11 @@ GeoIP 缓存仅在本循环测试中预置为回环测试值，避免外网变�
 
 `r1test` 包名为 `com.nezhahq.agent.r1test`，名称“哪吒探针 R1测试”，版本 386，debuggable，使用调试签名且通过 v1/v2 签名校验；已与原包并存安装并冷启动。正式 release 的包名保持 `com.nezhahq.agent`，本机未配置原发行 keystore。
 
+2026-10-31 已新增 Android17 / ARM64 / UID0 实机低风险测试，命令、只读文件、GPU 双字段和短超时通过；锁屏/切网期间的中断及恢复单独记录。见 [Android17 实机记录](R1_PHONE_TEST_ANDROID17_2026-10-31.md)。这项记录没有进行手机状态变更或高负载操作。
+
 仍需按 [R1_MANUAL_TEST.md](R1_MANUAL_TEST.md) 完成：
 
-- Android15/17 两台 SukiSU 真机的 App 授权、拒绝、停止/撤权及进程回收。
+- Android15 实机，以及两台 SukiSU 真机的管理器拒绝、停止/撤权及完整进程回收；Android17 既有授权下的 UID0 执行已经验证。
 - 真机 GPU 来源可读性、面板实际显示和后台至少 24 小时。
 - 原发行签名覆盖安装、UUID/配置/权限保留，以及递增 versionCode 的修复恢复。
 
