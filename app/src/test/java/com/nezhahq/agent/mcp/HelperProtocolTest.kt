@@ -42,9 +42,9 @@ class HelperProtocolTest {
 
     @Test fun handshakeRequiresAllIdentityFieldsAndFullNonce() {
         val nonce = HelperProtocol.nonce()
-        val valid = HelperProtocol.Hello(1, nonce, 10213, 10213, 123, 123)
+        val valid = HelperProtocol.Hello(HelperProtocol.VERSION, nonce, 10213, 10213, 123, 123)
         assertTrue(valid.verified(nonce, 10213))
-        assertFalse(valid.copy(version = 2).verified(nonce, 10213))
+        assertFalse(valid.copy(version = HelperProtocol.VERSION + 1).verified(nonce, 10213))
         assertFalse(valid.copy(uid = 0).verified(nonce, 10213))
         assertFalse(valid.copy(effectiveUid = 0).verified(nonce, 10213))
         assertFalse(valid.copy(pid = 1, sessionId = 1).verified(nonce, 10213))

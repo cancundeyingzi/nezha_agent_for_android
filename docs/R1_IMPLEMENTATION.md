@@ -24,7 +24,7 @@
 | `:app:lintRelease` | 通过；保留默认错误阻断，不采用候选的 `abortOnError=false` |
 | ADB 设备 | 已创建独立 API36 / 16 KiB 页模拟器，serial `emulator-5562`；用户另有 Android15/17 设备，可手动测试 |
 | Dashboard 版本与提交 | 用户要求最新版；2026-10-31 官方最新版为 v2.6.1，提交 `3e7d9ba60361e7968db2b029f28afc7cf32dd69e`；已准备仅回环监听的独立本地测试副本 |
-| 原发行签名与旧 APK 覆盖安装 | 待核验 |
+| 原发行签名与旧 APK 覆盖安装 | 原发行证书已核验；本地没有发行 keystore，正式签名覆盖验收待进行 |
 
 基线通过只证明上述固定源码在本机构建及 JVM 测试通过，不代表候选代码、真实 Android 后端或面板联调已通过。
 
@@ -37,7 +37,7 @@
 | DEV03 | 类型化 DTO、严格解析、结果语义、权限、配额与字节预算 | 实现、两轮审查、39/310 单测及 release/lint 通过；尚未接入真实任务 |
 | DEV04 | 参数数组、独立输出、stdin、超时取消和有界收尾 | 实现、双审查、39/356 单测及 release/lint 通过；真实 R8 helper 已验证，尚未接 Runtime |
 | DEV05 | 有界目录枚举、普通文件分段读取和 fd 校验 | 实现、双审查及构建检查通过；API36 debug/R8各25例、API23读/能力边界通过 |
-| DEV06 | Root/Shizuku 适配与明确能力错误 | 进行中 |
+| DEV06 | Root/Shizuku 适配与明确能力错误 | 实现及需求/质量复审通过；普通/高权 helper 已设备验证，真实 SukiSU 授权链待手测 |
 | DEV07 | State.gpus=18、旧 gpu=17 同采样映射 | 待实施 |
 | DEV08 | 单测、lint 门禁、release、设备/面板/稳定性验证 | 待实施 |
 
@@ -110,6 +110,7 @@ API26+ 的 FsList 使用已打开目录 fd 的 `/proc/self/fd` 锚定路径进�
 - `:app:assembleRelease :app:lintRelease` 通过。新解析器/编码器未接运行时，不能用此时 R8 输出测量实际依赖体积成本。
 - 需求与代码质量审查通过；Gson 严格模式残留、1024 字符数字缓冲限制、原始请求计费和最终 Protobuf 字节预算均有明确适配与回归。
 - 实际支持开关及旧 unsupported 清单保持原状，直到后续任务处理器接线后才对外启用。
+- Dashboard 固定提交的 `cmd/dashboard/rpc/rpc.go` 未覆盖 gRPC 消息大小；其 `go.mod` 固定 grpc-go v1.83.2，`server.go` 的默认接收消息上限为 4 MiB。本轮 3 MiB 上限针对完整序列化 TaskResult，留在该接收上限内；不把 JSON 字符数或原始输出字节数当作最终消息大小。
 
 ## DEV04 本地与设备验证
 
@@ -130,3 +131,15 @@ API26+ 的 FsList 使用已打开目录 fd 的 `/proc/self/fd` 锚定路径进�
 - 已从 Google 官方镜像建立全新的 API23 / Android6 x86 隔离设备，现有 SDK/AVD 不变。应用可安装冷启动并持续运行，无 AndroidRuntime 崩溃；debug 和 R8 的 FsRead 实际段/Base64/size/SHA256 正确，FsList 在加载 NIO26 前明确返回 `bounded_directory_enumeration_unavailable`。API23 helper Exec 也已真实通过 UID/session/高位 ID/exit7。
 - API23 旧 ADB exec 不提供远端退出码；验证中不把传输 EOF 的 0 当作 helper 实际退出码，用户命令结果仍由 protobuf 内的真实 exit_code 判断。
 - 用户提供的手测设备为 Android15/17，均使用 SukiSU；后续 Root 用例按该环境交付。原发行签名仍未提供。
+
+## DEV06 本地与设备验证
+
+- 普通模式 selector 不发现 su/Shizuku；高权按现有 RootShell 授权及固定后端策略启动。捕获 Shizuku Binder 并使用真实权限 RPC，发现失败、撤权和服务死亡均不隐式切换 su。Root 启用/服务 epoch 隔离旧任务和迟到结果。
+- 高权 helper 使用保存 fd3 的固定代理脚本；真实 mksh 验证表明直接 `<&0 &` 会得到 `/dev/null`，保存 fd3 后控制输入、EOF 和代理 wait 行为成立。私有 HELLO 升为 v2/60 字节，增加 startTicks；Dashboard 协议没有改变。
+- 全局四张用户资源束票与独立单槽短维护资源均保有未知退出的所有权。READY/UID 与 CLEAN 分开判定；无 HELLO 不能凭空扫描释放，本地 su 必须真实退出。失败候选轮转，旧 Root 的本地退出可由其他后端或普通模式满槽重查收敛，不新增 native 或权限请求。
+- 所有本轮问题均完成需求审查及代码质量复审。完整 core/app 单测、debug、release/R8、lint 已通过；最后满槽重查又执行受影响的资源池、普通 lease、高权 lease 和维护协调器测试及 debug 构建，均通过。
+- API36 / Android16 / 16 KiB 页、实际 App 授权 Shizuku UID2000：debug 与 R8 helper 各通过 UID、stdout/stderr 与 exit7、文件分段/Base64/段 hash、目录枚举以及进程授权关闭后的子进程回收。R8 此处指 helper；完整 Runtime 的 R8 路由仍需 DEV08 验证。
+- 官方 Shizuku Manager `13.6.0.r1086.2650830c` 实际撤权会 force-stop 测试 App；已确认 helper、命令 shell 和 sleep 所在组无活进程。撤权后的新请求明确拒绝，重新授权后可恢复。
+- 同一 App 进程启动四个高权资源束，在 HELLO/REQUEST 已接纳并实际执行命令后杀死测试 Shizuku 服务；四张未知票先保留，新服务授权后的固定维护协议按需恢复至零。测试只处理隔离模拟器与本地面板。
+- API23 上实际 R8 helper 通过 UID0 固定代理执行。该模拟器原本具有 root adbd，此证据证明 Root 执行机制，不代替 SukiSU 的 App 授权链。
+- Root/SukiSU 的授权与撤权、Android15/17 真机、24 小时后台以及原发行签名覆盖安装仍需真实验收。长期无法证明退出的维护槽或握手前资源可能需要真正终止并重开 App 进程；停止/启动探针服务不等于重建进程。

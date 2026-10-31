@@ -245,7 +245,7 @@ class ApplicationHelperLeaseTest {
     }
 
     companion object {
-        private fun hello() = HelperProtocol.Hello(1, ByteArray(32), 10213, 10213, 123, 123)
+        private fun hello() = HelperProtocol.Hello(HelperProtocol.VERSION, ByteArray(32), 10213, 10213, 123, 123)
         private fun identity(
             start: Long = 100, uid: Int = 10213, group: Int = 123, session: Int = 123, state: Char = 'S'
         ) = ApplicationProcessIdentity(uid, HelperSessionIdentity.Snapshot(123, group, session, start, state))

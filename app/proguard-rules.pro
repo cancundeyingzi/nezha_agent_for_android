@@ -37,3 +37,6 @@
 -keep class com.nezhahq.agent.mcp.helper.HelperMain {
     public static void main(java.lang.String[]);
 }
+-keep class com.nezhahq.agent.mcp.privileged.HelperCleanupMain {
+    public static void main(java.lang.String[]);
+}

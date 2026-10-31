@@ -13,9 +13,9 @@ import java.security.SecureRandom
 
 /** Internal protocol, independent of Dashboard JSON. A reader/writer has exactly one owner. */
 object HelperProtocol {
-    const val VERSION = 1
+    const val VERSION = 2
     const val NONCE_BYTES = 32
-    const val HELLO_BYTES = 4 + NONCE_BYTES + 4 * 4
+    const val HELLO_BYTES = 4 + NONCE_BYTES + 4 * 4 + 8
     const val REQUEST_METADATA_BYTES = 8 + 8 + 4 + 4
     const val OUTPUT_CHUNK_BYTES = 8192
     private const val MAGIC = 0x4e5a4d48 // NZMH
@@ -75,7 +75,8 @@ object HelperProtocol {
         val uid: Int,
         val effectiveUid: Int,
         val pid: Int,
-        val sessionId: Int
+        val sessionId: Int,
+        val startTimeTicks: Long = 0
     ) {
         fun verified(expectedNonce: ByteArray, expectedUid: Int): Boolean =
             version == VERSION && expectedUid >= 0 && uid == expectedUid && effectiveUid == expectedUid &&
@@ -110,12 +111,13 @@ object HelperProtocol {
         writeInt(hello.effectiveUid)
         writeInt(hello.pid)
         writeInt(hello.sessionId)
+        writeLong(hello.startTimeTicks)
     }
 
     fun decodeHello(payload: ByteArray): Hello {
         if (payload.size != HELLO_BYTES) throw ProtocolFailure()
         return DataInputStream(ByteArrayInputStream(payload)).run {
-            Hello(readInt(), ByteArray(NONCE_BYTES).also { readFully(it) }, readInt(), readInt(), readInt(), readInt())
+            Hello(readInt(), ByteArray(NONCE_BYTES).also { readFully(it) }, readInt(), readInt(), readInt(), readInt(), readLong())
         }
     }
 

@@ -161,7 +161,7 @@ class HelperExecRunnerTest {
         val calls = AtomicInteger()
         val terminated = AtomicBoolean(false)
         val isolation = object : HelperIsolation {
-            override fun establish(nonce: ByteArray) = HelperProtocol.Hello(1, nonce, 10213, 10213, 123, 123)
+            override fun establish(nonce: ByteArray) = HelperProtocol.Hello(HelperProtocol.VERSION, nonce, 10213, 10213, 123, 123)
             override fun terminate() {
                 if (terminated.compareAndSet(false, true)) {
                     val reader = HelperProtocol.Reader(ByteArrayInputStream(output.toByteArray()))
@@ -192,7 +192,7 @@ class HelperExecRunnerTest {
         val entered = CountDownLatch(1)
         val revoked = CountDownLatch(1)
         val isolation = object : HelperIsolation {
-            override fun establish(nonce: ByteArray) = HelperProtocol.Hello(1, nonce, 10213, 10213, 123, 123)
+            override fun establish(nonce: ByteArray) = HelperProtocol.Hello(HelperProtocol.VERSION, nonce, 10213, 10213, 123, 123)
             override fun terminate() { revoked.countDown() }
         }
         val thread = Thread({

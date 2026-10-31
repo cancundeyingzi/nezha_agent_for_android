@@ -175,7 +175,7 @@ class McpFsBackendTest {
             val output = ByteArrayOutputStream()
             val terminated = AtomicInteger()
             val isolation = object : HelperIsolation {
-                override fun establish(nonce: ByteArray) = HelperProtocol.Hello(1, nonce, 10213, 10213, 1234, 1234)
+                override fun establish(nonce: ByteArray) = HelperProtocol.Hello(HelperProtocol.VERSION, nonce, 10213, 10213, 1234, 1234)
                 override fun terminate() {
                     if (terminated.incrementAndGet() == 1) {
                         val reader = HelperProtocol.Reader(ByteArrayInputStream(output.toByteArray()))
@@ -201,7 +201,7 @@ class McpFsBackendTest {
     private fun task(type: Long, data: String) = Task.newBuilder().setId(Long.MIN_VALUE).setType(type).setData(data).build()
     private fun json(result: TaskResult) = JsonParser.parseString(result.data).asJsonObject
     private fun enabled() = RemoteCapabilities(fileManagerEnabled = true)
-    private fun hello(spec: HelperLaunchSpec) = HelperProtocol.Hello(1, spec.nonce, 10213, 10213, 1234, 1234)
+    private fun hello(spec: HelperLaunchSpec) = HelperProtocol.Hello(HelperProtocol.VERSION, spec.nonce, 10213, 10213, 1234, 1234)
     private fun frames(block: HelperProtocol.Writer.() -> Unit) = ByteArrayOutputStream().also {
         HelperProtocol.Writer(it).block()
     }.toByteArray()

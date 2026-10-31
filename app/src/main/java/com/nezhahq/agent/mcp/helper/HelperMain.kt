@@ -61,7 +61,11 @@ private class AndroidHelperIsolation : HelperIsolation {
         check(pid > 1 && session == pid)
         ownedGroup.set(pid)
         Os.kill(-pid, 0)
-        return HelperProtocol.Hello(HelperProtocol.VERSION, nonce, Os.getuid(), Os.geteuid(), pid, session)
+        val identity = FileInputStream("/proc/self/stat").use { HelperSessionIdentity.readSnapshot(it, pid) }
+        check(identity != null && identity.ownsSession && identity.startTimeTicks > 0)
+        return HelperProtocol.Hello(
+            HelperProtocol.VERSION, nonce, Os.getuid(), Os.geteuid(), pid, session, identity.startTimeTicks
+        )
     }
 
     override fun terminate() {

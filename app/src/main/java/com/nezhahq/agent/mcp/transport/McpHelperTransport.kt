@@ -55,7 +55,7 @@ class McpHelperTransport {
             HelperIoPools.diagnostic.discard {
                 // Startup diagnostics can contain platform details. Retain/log nothing; bound total
                 // work as well as memory, then close the diagnostic pipe independently of stdout.
-                ownedProcess.stderr.use { input ->
+                ownedProcess.stderr.let { input ->
                     val buffer = ByteArray(1024)
                     var remaining = 64 * 1024
                     while (remaining > 0) {
@@ -75,11 +75,12 @@ class McpHelperTransport {
                     HelperProtocol.decodeHello(bytes)
                 }
             }
-            if (!hello.verified(nonce, ownedProcess.expectedUid)) throw capabilityFailure()
-            ownedProcess.acceptIdentity(hello)
-            verified = true
             within(deadline) {
                 HelperIoPools.protocol.run {
+                    if (!hello.verified(nonce, ownedProcess.expectedUid)) throw capabilityFailure()
+                    ownedProcess.acceptIdentity(hello)
+                    verified = true
+                    ownedProcess.beforeRequest()
                     val remaining = deadline.remainingMillis
                     if (remaining == 0L) throw DeadlineExceeded()
                     writer.frame(HelperProtocol.Kind.REQUEST, HelperProtocol.encodeRequest(HelperProtocol.Request(

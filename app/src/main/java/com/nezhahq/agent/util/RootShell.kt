@@ -1,7 +1,14 @@
 package com.nezhahq.agent.util
 
 import android.content.pm.PackageManager
+import android.os.IBinder
 import com.nezhahq.agent.core.security.PrivilegedAccessController
+import com.nezhahq.agent.mcp.privileged.AndroidPrivilegedGateway
+import com.nezhahq.agent.mcp.privileged.PrivilegedHelperAuthority
+import com.nezhahq.agent.mcp.privileged.PrivilegedHelperReconciler
+import com.nezhahq.agent.mcp.privileged.McpRemoteProcess
+import com.nezhahq.agent.mcp.privileged.PrivilegedLaunchNotStarted
+import moe.shizuku.server.IShizukuService
 import java.io.File
 import java.io.InputStream
 import java.security.SecureRandom
@@ -28,12 +35,20 @@ object RootShell {
     private const val RETRY_COOLDOWN_MS = 30_000L
     private const val MARKER_RANDOM_BYTES = 24
     private val markerRandom = SecureRandom()
+    private val authorizationLifecycleLock = Any()
+    @Volatile private var authorizationEpoch = 0L
 
     private val managedProcessLock = Any()
     private val managedProcesses = mutableSetOf<ManagedProcess>()
     private val backendPolicy = ShellBackendPolicy()
+    internal val mcpAuthority by lazy {
+        PrivilegedHelperAuthority(AndroidPrivilegedGateway, backendPolicy,
+            onLiveService = PrivilegedHelperReconciler::authorized)
+    }
 
-    private val persistentShell = PersistentShell(
+    @Volatile private var persistentShell = newPersistentShell()
+
+    private fun newPersistentShell() = PersistentShell(
         sessionFactory = ::startSession,
         markerFactory = { ShellMarker(newMarkerToken()) },
         retryCooldownMs = RETRY_COOLDOWN_MS,
@@ -41,21 +56,51 @@ object RootShell {
     )
 
     private val accessController = PrivilegedAccessController(
-        cleanup = ::closePrivilegedResources
+        // RootShell detaches the old epoch's concrete resources under its short lifecycle lock.
+        // Their slow cleanup runs only after the controller and MCP permits are already revoked.
+        cleanup = {}
     )
 
     /** Applies the persisted process-level root authorization state. */
     fun configureAuthorization(enabled: Boolean) {
-        if (enabled) {
-            accessController.enable()
-        } else {
-            accessController.disableAndRevoke()
-            backendPolicy.reset()
+        val authority = mcpAuthority
+        val transition = synchronized(authorizationLifecycleLock) {
+            if (enabled) {
+                if (!accessController.isEnabled()) authorizationEpoch++
+                accessController.enable()
+                authority.configureDeferred(true) to null
+            } else {
+                authorizationEpoch++
+                accessController.disableAndRevoke()
+                val revoke = authority.configureDeferred(false)
+                backendPolicy.reset()
+                revoke to detachLegacyResources()
+            }
         }
+        transition.first.invoke()
+        transition.second?.close()
     }
 
     /** Returns whether privileged operations are currently authorized for this process. */
     fun isAuthorized(): Boolean = accessController.isEnabled()
+
+    /** Raw MCP boundary: no merged streams, legacy UID commands, or managed-shell registration. */
+    internal fun startMcpSuRaw(
+        path: String, command: String, environment: Map<String, String>, directory: String
+    ): Process {
+        if (!accessController.isEnabled() || !File(path).isAbsolute || !File(path).canExecute()) {
+            throw PrivilegedLaunchNotStarted()
+        }
+        return ProcessBuilder(path, "-c", command).directory(File(directory)).redirectErrorStream(false)
+            .apply { environment().apply { clear(); putAll(environment) } }.start()
+    }
+
+    internal fun startMcpShizukuRaw(
+        binder: IBinder, service: IShizukuService, argv: Array<String>, environment: Array<String>, directory: String
+    ): Process {
+        if (!accessController.isEnabled() || !binder.isBinderAlive) throw PrivilegedLaunchNotStarted()
+        return McpRemoteProcess(service.newProcess(argv, environment, directory))
+    }
 
     /**
      * Executes [command] on the shared session, returning at most 4 MiB of merged stdout/stderr.
@@ -163,7 +208,13 @@ object RootShell {
 
     /** Closes the process and reader executor. A later call to [execute] can start them again. */
     fun shutdown() {
-        closePrivilegedResources()
+        val authority = mcpAuthority
+        val detached = synchronized(authorizationLifecycleLock) {
+            authorizationEpoch++
+            authority.revokeDeferred() to detachLegacyResources()
+        }
+        detached.first.invoke()
+        detached.second.close()
     }
 
     fun isAlive(): Boolean = accessController.isEnabled() && persistentShell.isAlive()
@@ -181,7 +232,7 @@ object RootShell {
     private fun startSession(): ShellSession? {
         if (!accessController.isEnabled()) return null
         val launched = startShellProcess(workingDirectory = null) ?: return null
-        if (!accessController.isEnabled()) {
+        if (!accessController.isEnabled() || launched.authorizationEpoch != authorizationEpoch) {
             ShellSession.destroyProcess(launched.process)
             return null
         }
@@ -196,7 +247,7 @@ object RootShell {
     private fun startManagedShell(workingDirectory: File?): ManagedProcess? {
         if (!accessController.isEnabled()) return null
         val launched = startShellProcess(workingDirectory) ?: return null
-        if (!accessController.isEnabled()) {
+        if (!accessController.isEnabled() || launched.authorizationEpoch != authorizationEpoch) {
             ShellSession.destroyProcess(launched.process)
             return null
         }
@@ -208,10 +259,13 @@ object RootShell {
                 flush()
             }
             val managed = ManagedProcess(launched.process, launched.type)
-            synchronized(managedProcessLock) {
-                managedProcesses += managed
+            val registered = synchronized(authorizationLifecycleLock) {
+                if (!accessController.isEnabled() || launched.authorizationEpoch != authorizationEpoch) false else {
+                    synchronized(managedProcessLock) { managedProcesses += managed }
+                    true
+                }
             }
-            if (!accessController.isEnabled()) {
+            if (!registered || !accessController.isEnabled() || launched.authorizationEpoch != authorizationEpoch) {
                 managed.close()
                 null
             } else {
@@ -226,22 +280,23 @@ object RootShell {
 
     private fun startShellProcess(workingDirectory: File?): LaunchedShell? {
         if (!accessController.isEnabled()) return null
-
-        return synchronized(backendPolicy) {
-            val backend = backendPolicy.select(
+        val launchEpoch = authorizationEpoch
+        val policyEpoch = backendPolicy.epoch()
+        val backend = backendPolicy.select(
                 shizukuAuthorized = isShizukuAvailable(),
                 shizukuRunning = runCatching { Shizuku.pingBinder() }.getOrDefault(false),
                 suInstalled = System.getenv("PATH").orEmpty().split(File.pathSeparatorChar)
-                    .filter { it.isNotBlank() }.any { File(it, "su").canExecute() }
-            ) ?: return@synchronized null
-            if (!accessController.isEnabled()) return@synchronized null
-            when (backend) {
+                    .filter { it.isNotBlank() }.any { File(it, "su").canExecute() },
+                expectedEpoch = policyEpoch
+            ) ?: return null
+        if (!accessController.isEnabled() || authorizationEpoch != launchEpoch) return null
+        // Backend selection is fixed before IO. No process launch or Binder call holds its lock.
+        return when (backend) {
                 ShellBackend.SHIZUKU -> startShizukuShell(workingDirectory)
                 ShellBackend.SU -> startSuShell(workingDirectory).also {
-                    if (it == null) backendPolicy.rejectSu()
+                    if (it == null) backendPolicy.rejectSu(policyEpoch)
                 }
-            }
-        }
+            }?.copy(authorizationEpoch = launchEpoch)
     }
 
     private fun startSuShell(workingDirectory: File?): LaunchedShell? {
@@ -304,11 +359,25 @@ object RootShell {
     }
 
     private fun closePrivilegedResources() {
-        persistentShell.shutdown()
+        val detached = synchronized(authorizationLifecycleLock) { detachLegacyResources() }
+        detached.close()
+    }
+
+    /** Caller holds only the lifecycle lock. Snapshot construction does no IO or callbacks. */
+    private fun detachLegacyResources(): LegacyResources {
+        val shell = persistentShell
+        persistentShell = newPersistentShell()
         val processes = synchronized(managedProcessLock) {
             managedProcesses.toList().also { managedProcesses.clear() }
         }
-        processes.forEach(ManagedProcess::forceClose)
+        return LegacyResources(shell, processes)
+    }
+
+    private class LegacyResources(val shell: PersistentShell, val processes: List<ManagedProcess>) {
+        fun close() {
+            try { shell.shutdown() }
+            finally { processes.forEach { runCatching { it.forceClose() } } }
+        }
     }
 
     private fun unregister(managedProcess: ManagedProcess) {
@@ -360,7 +429,8 @@ object RootShell {
 
     private data class LaunchedShell(
         val process: Process,
-        val type: String
+        val type: String,
+        val authorizationEpoch: Long = 0
     )
 
     internal class ManagedProcess internal constructor(
@@ -410,9 +480,17 @@ internal enum class ShellBackend {
 internal class ShellBackendPolicy {
     private var selected: ShellBackend? = null
     private var suRejected = false
+    private var generation = 0L
 
     @Synchronized
-    fun select(shizukuAuthorized: Boolean, shizukuRunning: Boolean, suInstalled: Boolean): ShellBackend? {
+    fun epoch(): Long = generation
+
+    @Synchronized
+    fun select(
+        shizukuAuthorized: Boolean, shizukuRunning: Boolean, suInstalled: Boolean,
+        expectedEpoch: Long? = null
+    ): ShellBackend? {
+        if (expectedEpoch != null && expectedEpoch != generation) return null
         if (selected == ShellBackend.SHIZUKU) return if (shizukuAuthorized) selected else null
         if (selected == ShellBackend.SU) return if (suRejected || !suInstalled) null else selected
         selected = when {
@@ -424,10 +502,16 @@ internal class ShellBackendPolicy {
     }
 
     @Synchronized
-    fun rejectSu() { suRejected = true }
+    fun rejectSu(expectedEpoch: Long? = null) {
+        if (expectedEpoch == null || expectedEpoch == generation) suRejected = true
+    }
+
+    @Synchronized
+    fun suAllowed(expectedEpoch: Long): Boolean = generation == expectedEpoch && selected == ShellBackend.SU && !suRejected
 
     @Synchronized
     fun reset() {
+        generation++
         selected = null
         suRejected = false
     }

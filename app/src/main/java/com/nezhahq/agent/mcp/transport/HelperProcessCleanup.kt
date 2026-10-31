@@ -8,6 +8,7 @@ import java.util.concurrent.ThreadFactory
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.Collections
 
 /**
@@ -26,36 +27,58 @@ internal class HelperProcessCleanup(val capacity: Int = 4) {
     val retainedProcesses: Int get() = capacity - slots.availablePermits()
 
     fun tryAcquire(): Ticket? {
-        if (!slots.tryAcquire()) return null
+        if (!slots.tryAcquire()) {
+            active.take(capacity).forEach { it.retryRetained() }
+            return null
+        }
         return Ticket().also { active.add(it) }
     }
 
     inner class Ticket internal constructor() {
-        private val state = AtomicInteger(0) // reserved, scheduled, released
-        @Volatile private var cleanup: (() -> Unit)? = null
+        private val state = AtomicInteger(0) // reserved, scheduled, retained, released
+        private val retryRequested = AtomicBoolean(false)
+        @Volatile private var cleanup: (() -> Boolean)? = null
         @Volatile private var finished = false
         val released: Boolean get() = finished
 
         fun releaseUnused() {
-            if (state.compareAndSet(0, 2)) release()
+            if (state.compareAndSet(0, 3)) release()
         }
 
         fun schedule(action: () -> Unit) {
+            scheduleUntil { action(); true }
+        }
+
+        /** Unknown remote exit keeps its process slot. A later trusted probe may retry it. */
+        fun scheduleUntil(action: () -> Boolean) {
             if (!state.compareAndSet(0, 1)) return
             cleanup = action
+            submit()
+        }
+
+        fun retryRetained() {
+            retryRequested.set(true)
+            if (state.compareAndSet(2, 1)) { retryRequested.set(false); submit() }
+        }
+
+        private fun submit() {
             try {
                 executor.execute {
-                    try { cleanup?.invoke() }
-                    finally {
+                    val complete = try { cleanup?.invoke() == true } catch (_: Exception) { false }
+                    if (complete) {
                         cleanup = null
-                        state.set(2)
+                        state.set(3)
                         release()
+                    } else {
+                        state.set(2)
+                        if (retryRequested.getAndSet(false)) retryRetained()
                     }
                 }
             } catch (_: RejectedExecutionException) {
                 // There are at most capacity jobs and a capacity-sized queue; normal operation
                 // cannot reject. Retain the ticket/action if scheduling nevertheless fails rather
                 // than admitting an unlimited number of unclosed processes.
+                state.set(2)
             }
         }
 

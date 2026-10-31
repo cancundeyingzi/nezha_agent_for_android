@@ -43,6 +43,8 @@ interface HelperProcessLease : AutoCloseable {
     val stdin: OutputStream
     val stderr: InputStream
     fun acceptIdentity(hello: HelperProtocol.Hello)
+    /** Runs in the same deadline-bounded protocol worker as the first REQUEST write. */
+    fun beforeRequest() = Unit
     override fun close()
 }
 

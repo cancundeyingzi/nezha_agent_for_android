@@ -18,7 +18,7 @@ import proto.Nezha.TaskResult
 class HelperTransportTest {
     @Test fun rejectedHandshakeNeverSendsAnyUserBytesAndClosesLease() = runBlocking {
         val changes: List<(HelperProtocol.Hello) -> HelperProtocol.Hello> = listOf(
-            { it.copy(version = 2) }, { it.copy(uid = 0) }, { it.copy(effectiveUid = 0) },
+            { it.copy(version = HelperProtocol.VERSION + 1) }, { it.copy(uid = 0) }, { it.copy(effectiveUid = 0) },
             { it.copy(sessionId = it.pid + 1) }, { it.copy(nonce = ByteArray(32)) }
         )
         for (change in changes) {
@@ -248,7 +248,7 @@ class HelperTransportTest {
 
     private fun result(id: Long) = TaskResult.newBuilder().setId(id).setType(15).setSuccessful(true).setData("{}").build()
     private fun task(data: String) = Task.newBuilder().setId(1).setType(15).setData(data).build()
-    private fun hello(spec: HelperLaunchSpec) = HelperProtocol.Hello(1, spec.nonce, 10213, 10213, 1234, 1234)
+    private fun hello(spec: HelperLaunchSpec) = HelperProtocol.Hello(HelperProtocol.VERSION, spec.nonce, 10213, 10213, 1234, 1234)
     private fun frames(write: HelperProtocol.Writer.() -> Unit): ByteArray = ByteArrayOutputStream().also {
         HelperProtocol.Writer(it).write()
     }.toByteArray()
