@@ -162,3 +162,12 @@ API26+ 的 FsList 使用已打开目录 fd 的 `/proc/self/fd` 锚定路径进�
 - 本地 Dashboard v2.6.1 与 API36 / 16 KiB 页通过真实 gRPC/MCP：普通 UID、argv 元字符、独立 stdout/stderr 和 exit7、含 NUL 的 stdin/EOF、环境隔离、启动也计入的短期限、超时保留输出、两路截断、JSON 膨胀后的有界错误、特殊名目录、5011 项目录完整 total/5000 条上限、分段 Base64/段 SHA256、最终软链接拒绝，以及两条长 Exec 满额后第三条 busy、文件请求仍可完成。临时只读/执行令牌在本次验证结束即撤销。
 - 1 秒期限可能在 helper 启动阶段到期，不能据此强求已经产生 stdout；短期限用例验证有限返回，输出保留用例采用 5 秒，符合总期限包含启动开销的定义。
 - 同进程 100 次真实连接重建和命令取消、完整混淆 App、API23 联调、并存测试 APK 与最终验收记录继续在 DEV08 完成。
+
+## DEV08 设备验收进展
+
+- `A0.11.0-r1 / 386` 的 r1test 已实际检查包名 `.r1test`、中文名称、min23/target35、debuggable 与 v1/v2 签名；与原包并存安装和冷启动通过。正式 release 仍保持原包名及 unsigned 产物，测试签名不冒充原发行证书。
+- 完整 minified r1test 与 production release 代码在隔离设备均通过真实 MCP：Exec UID/exit7/双输出、FsRead/FsList、运行中关闭 Shell 后进程组退出、File 权限不受影响、重开后新请求正常、关闭 File 后新读取明确拒绝。production release 设备副本只用调试证书签在隔离环境验证，不能作为正式覆盖包。
+- 完整 release 的 Root 路径实际使用 Shizuku UID2000，Exec、文件段读取、不能自动降级读取 App 私有目录，以及 Root 配置重载取消旧组/不重放均通过。
+- API23 完整 release R8 应用以 App UID10061 通过真实 gRPC/MCP Exec、exit7/独立输出和 FsRead；FsList 在加载 NIO26 前明确返回兼容能力错误。
+- 首次 100 轮资源检查发现重复硬件名称 EGL 探测残留模拟器驱动连接。真实 FD 分类、停止/GC 及仅跳过名称探测的对照确认后，补充 EGL 线程释放与成功硬件信息的进程缓存；不改变 GPU 使用率采样和模式策略。新版本冷 App 真实 EGL 的 100 轮完整通过：同 PID30113，连接 FD91–92、最终90；PSS 首103725 KiB、末100686 KiB、停止100290 KiB；每轮 native 票0、旧组全部退出、无跨会话旧结果。
+- 当前全量为 40 项 core、461 项 app 单测通过，debug/release/r1test R8 与 lint 全部通过。最终整体审查额外发现普通 helper 退出证明与被替换共享 Shell 的生命周期边界，正在补齐后再次验证。
