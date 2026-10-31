@@ -1,0 +1,1 @@
+{"cmd":"/system/bin/sh","args":["-c","printf '%s' \"$GREETING\""],"cwd":"/data/local/tmp","env":{"GREETING":"你好😀"},"stdin":"input\n\u0001","timeout_seconds":4294967295,"max_output_bytes":4294967295}

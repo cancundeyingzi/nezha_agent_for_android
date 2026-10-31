@@ -83,6 +83,9 @@ dependencies {
     // OKHTTP for Trace and Tasks
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
+    // MCP uses explicit streaming adapters, never reflective DTO serialization.
+    implementation("com.google.code.gson:gson:2.10.1")
+
     // gRPC & Protobuf
     implementation("io.grpc:grpc-okhttp:$grpcVersion")
     implementation("io.grpc:grpc-protobuf-lite:$grpcVersion")

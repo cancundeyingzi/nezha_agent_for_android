@@ -1,0 +1,1 @@
+{"entries":[{"name":"hello","type":"file","size":5,"mode":"0644","mtime":1700000000},{"name":"link","type":"symlink","size":5,"mode":"0777","mtime":1700000001,"is_symlink":true,"link_target":"hello"}],"total":2}

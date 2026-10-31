@@ -1,0 +1,7 @@
+# Dashboard v2.6.1 controller/mcp_capability.go compareSemver(host, v2.1.0)
+A0.10.1	-1
+2.0.99+android.A0.10.1	-1
+2.1.0+android.A0.10.1	0
+v2.1.0+android.A0.10.1	0
+2.1.0-android.A0.10.1	0
+2.1.1+android.A0.10.1	1

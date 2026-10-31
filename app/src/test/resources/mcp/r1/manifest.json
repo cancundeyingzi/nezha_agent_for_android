@@ -1,0 +1,1 @@
+{"agent_sha":"c2b65ab6fa8926f3c7ed4ef3a0065fe003410237","dashboard_tag":"v2.6.1","task_types":{"exec":15,"fs_list":16,"fs_read":17},"source_files":["model/task.go","cmd/agent/mcp_exec.go","cmd/agent/mcp_handlers.go"],"note":"Pinned protocol examples, not a claim of device execution or support for tasks 12-14 and 18-20."}
