@@ -64,8 +64,8 @@ class AgentService : Service() {
                 )
             },
             applyPrivilegedAccess = RootShell::configureAuthorization,
-            finalCleanup = {
-                RootShell.shutdown()
+            finalCleanup = RootShell::shutdown,
+            onFinalCleanupComplete = {
                 Logger.i("AgentService: process-owned RootShell resources closed.")
             },
             onTeardownFailure = { failure ->
@@ -80,7 +80,6 @@ class AgentService : Service() {
             onConfigurationUnusable = { failure ->
                 Logger.e("AgentService: 连接配置不可用，服务停止，等待用户修正配置", failure)
                 updateNotification("连接配置无效或不可用，服务已停止")
-                stopSelf()
             },
             onRuntimeUnavailable = { failure, retryDelayMillis ->
                 val retrySeconds = retryDelayMillis / MILLIS_PER_SECOND
@@ -91,7 +90,8 @@ class AgentService : Service() {
                 Logger.e("AgentService: 重载被拒绝，继续使用当前连接", failure)
                 updateNotification("重载失败，继续使用当前连接")
             },
-            awaitPreviousShutdown = SHUTDOWN_GATE::awaitIdle
+            awaitPreviousShutdown = SHUTDOWN_GATE::awaitIdle,
+            stopForUnusableConfiguration = { stopSelf() }
         )
         createNotificationChannel()
         startAgentForeground("正在读取连接配置...")

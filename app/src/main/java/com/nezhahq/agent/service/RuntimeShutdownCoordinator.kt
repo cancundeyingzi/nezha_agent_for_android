@@ -9,13 +9,15 @@ import kotlinx.coroutines.withContext
  * Completion-tracked ordered teardown for one runtime.
  *
  * Successful phases are not repeated. Failed phases remain retryable, and every phase is attempted
- * before failures are propagated.
+ * before failures are propagated. A false keep-alive result completes its bounded auxiliary attempt;
+ * its report cannot turn that outcome into a failure of core teardown.
  */
 internal class RuntimeShutdownCoordinator(
     private val cancelAndJoinWork: suspend () -> Unit,
     private val closeNetwork: () -> Unit,
-    private val closeKeepAlive: suspend () -> Unit,
-    private val closeGrpc: () -> Unit
+    private val closeKeepAlive: suspend () -> Boolean,
+    private val closeGrpc: () -> Unit,
+    private val onKeepAliveCloseIncomplete: () -> Unit = {}
 ) {
     private val closeMutex = Mutex()
     private var workClosed = false
@@ -33,7 +35,9 @@ internal class RuntimeShutdownCoordinator(
                 attempt(failures, onSuccess = { networkClosed = true }) { closeNetwork() }
             }
             if (!keepAliveClosed) {
-                attempt(failures, onSuccess = { keepAliveClosed = true }, closeKeepAlive)
+                attempt(failures, onSuccess = { keepAliveClosed = true }) {
+                    if (!closeKeepAlive()) reportLifecycleEvent(onKeepAliveCloseIncomplete)
+                }
             }
             if (!grpcClosed) {
                 attempt(failures, onSuccess = { grpcClosed = true }) { closeGrpc() }

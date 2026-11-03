@@ -31,7 +31,8 @@ internal class AgentRuntimeController(
     private val factory: AgentRuntimeFactory,
     private val applyPrivilegedAccess: (Boolean) -> Unit = {},
     private val finalCleanup: () -> Unit = {},
-    private val onTeardownFailure: (Throwable) -> Unit = {}
+    private val onTeardownFailure: (Throwable) -> Unit = {},
+    private val onFinalCleanupComplete: () -> Unit = {}
 ) {
     private val transitionMutex = Mutex()
     private var current: AgentRuntimeHandle? = null
@@ -91,6 +92,7 @@ internal class AgentRuntimeController(
         transitionMutex.withLock {
             terminal = true
             val failures = listOfNotNull(stopCurrent(), releaseProcessResources())
+            currentCoroutineContext().ensureActive()
             val primary = failures.firstOrNull() ?: return@withLock
             failures.drop(1).filter { it !== primary }.forEach(primary::addSuppressed)
             throw primary
@@ -135,10 +137,12 @@ internal class AgentRuntimeController(
     private suspend fun releaseProcessResources(): Throwable? {
         if (finalCleanupComplete) return null
         return withContext(NonCancellable) {
-            runCatching {
+            val failure = runCatching {
                 finalCleanup()
                 finalCleanupComplete = true
             }.exceptionOrNull()
+            if (failure == null) reportLifecycleEvent(onFinalCleanupComplete)
+            failure
         }
     }
 }

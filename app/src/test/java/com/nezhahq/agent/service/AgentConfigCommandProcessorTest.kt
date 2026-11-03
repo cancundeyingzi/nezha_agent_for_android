@@ -8,11 +8,13 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -374,11 +376,13 @@ class AgentConfigCommandProcessorTest {
     }
 
     @Test
-    fun failedOldCleanupReportsUnavailableAndRetryCleansBeforeCreatingOnce() = runBlocking {
+    fun throwingUnavailableReportStillRetriesCleanupAndAcceptsLaterCommands() = runBlocking {
         val scope = CoroutineScope(coroutineContext + SupervisorJob())
         val unavailable = CompletableDeferred<Long>()
         val releaseRetry = CompletableDeferred<Unit>()
         val restarted = CompletableDeferred<Unit>()
+        val laterStarted = CompletableDeferred<Unit>()
+        val repository = FakeConfigRepository(config("next"))
         val events = mutableListOf<String>()
         var oldStops = 0
         var rejected = 0
@@ -388,6 +392,7 @@ class AgentConfigCommandProcessorTest {
                 onStart = {
                     events += "start-${snapshot.server}"
                     if (snapshot.server == "next") restarted.complete(Unit)
+                    if (snapshot.server == "later") laterStarted.complete(Unit)
                 },
                 onStop = {
                     events += "stop-${snapshot.server}"
@@ -398,8 +403,11 @@ class AgentConfigCommandProcessorTest {
         controller.reload(config("old"))
         val processor = processor(
             scope, kotlinx.coroutines.Dispatchers.Unconfined,
-            FakeConfigRepository(config("next")), controller,
-            onRuntimeUnavailable = { _, delayMillis -> unavailable.complete(delayMillis) },
+            repository, controller,
+            onRuntimeUnavailable = { _, delayMillis ->
+                unavailable.complete(delayMillis)
+                error("notification failed")
+            },
             onReloadRejected = { rejected++ },
             delayBeforeRetry = { releaseRetry.await() }
         )
@@ -418,6 +426,15 @@ class AgentConfigCommandProcessorTest {
             assertEquals(
                 listOf("create-old", "start-old", "stop-old", "stop-old", "create-next", "start-next"),
                 events
+            )
+
+            repository.result = Result.success(config("later"))
+            processor.requestReload()
+            withTimeout(2_000) { laterStarted.await() }
+            controller.updateCapabilities(RemoteCapabilities())
+            assertEquals(
+                listOf("create-old", "create-next", "create-later"),
+                events.filter { it.startsWith("create-") }
             )
         } finally {
             processor.close()
@@ -503,6 +520,108 @@ class AgentConfigCommandProcessorTest {
         assertEquals(0, creates)
         controller.stop()
         scope.cancel()
+    }
+
+    @Test
+    fun throwingConfigurationReportsCannotSkipRequiredStopOrKillLaterCommands() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + SupervisorJob())
+        val reports = Channel<String>(Channel.UNLIMITED)
+        val starts = Channel<String>(Channel.UNLIMITED)
+        val repository = FakeConfigRepository(config("initial")).apply {
+            result = Result.failure(IllegalArgumentException("invalid config"))
+        }
+        var requiredStops = 0
+        var failCapabilities = false
+        val controller = AgentRuntimeController(AgentRuntimeFactory { snapshot ->
+            RecordingRuntime(
+                onStart = { starts.trySend(snapshot.server) },
+                onCapabilities = { if (failCapabilities) error("capability update failed") }
+            )
+        })
+        val processor = processor(
+            scope, kotlinx.coroutines.Dispatchers.Unconfined, repository, controller,
+            stopForUnusableConfiguration = { requiredStops++ },
+            onConfigurationUnusable = {
+                reports.trySend("unusable")
+                error("configuration logger failed")
+            },
+            onReloadRejected = {
+                reports.trySend("rejected")
+                throw CancellationException("report failed while caller remains active")
+            }
+        )
+
+        try {
+            processor.requestReload()
+            assertEquals("unusable", withTimeout(2_000) { reports.receive() })
+            assertEquals(1, requiredStops)
+
+            repository.result = Result.success(config("first"))
+            processor.requestReload()
+            assertEquals("first", withTimeout(2_000) { starts.receive() })
+            controller.updateCapabilities(RemoteCapabilities())
+
+            repository.result = Result.failure(IllegalStateException("storage unavailable"))
+            processor.requestReload()
+            assertEquals("rejected", withTimeout(2_000) { reports.receive() })
+            assertTrue(controller.isRunning)
+
+            repository.result = Result.success(config("second"))
+            processor.requestReload()
+            assertEquals("second", withTimeout(2_000) { starts.receive() })
+            controller.updateCapabilities(RemoteCapabilities())
+
+            failCapabilities = true
+            processor.requestCapabilityRefresh()
+            assertEquals("rejected", withTimeout(2_000) { reports.receive() })
+            failCapabilities = false
+            repository.result = Result.success(config("third"))
+            processor.requestReload()
+            assertEquals("third", withTimeout(2_000) { starts.receive() })
+            controller.updateCapabilities(RemoteCapabilities())
+            assertTrue(controller.isRunning)
+            assertEquals(1, requiredStops)
+        } finally {
+            processor.close()
+            controller.stop()
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun reportingIsolationPreservesActualCommandScopeCancellation() = runBlocking {
+        val commandJob = SupervisorJob()
+        val scope = CoroutineScope(coroutineContext + commandJob)
+        val reported = CompletableDeferred<Unit>()
+        var creates = 0
+        var retryWaits = 0
+        val controller = AgentRuntimeController(AgentRuntimeFactory {
+            creates++
+            RecordingRuntime(onStart = { error("start failed") })
+        })
+        val processor = processor(
+            scope, kotlinx.coroutines.Dispatchers.Unconfined,
+            FakeConfigRepository(config("panel")), controller,
+            onRuntimeUnavailable = { _, _ ->
+                commandJob.cancel()
+                reported.complete(Unit)
+                error("notification failed after cancellation")
+            },
+            delayBeforeRetry = { retryWaits++ }
+        )
+
+        try {
+            processor.requestReload()
+            withTimeout(2_000) { reported.await(); commandJob.join() }
+            processor.requestReload()
+            assertEquals(1, creates)
+            assertEquals(0, retryWaits)
+            assertTrue(commandJob.isCancelled)
+        } finally {
+            processor.close()
+            controller.stop()
+            scope.cancel()
+        }
     }
 
     @Test
@@ -613,7 +732,8 @@ class AgentConfigCommandProcessorTest {
         onReloadRejected: (Throwable) -> Unit = {},
         awaitPreviousShutdown: suspend () -> Unit = {},
         // Real backoff by default, so a test that does not opt in never observes a retry.
-        delayBeforeRetry: suspend (Long) -> Unit = { delay(it) }
+        delayBeforeRetry: suspend (Long) -> Unit = { delay(it) },
+        stopForUnusableConfiguration: () -> Unit = {}
     ) = AgentConfigCommandProcessor(
         scope = scope,
         repository = repository,
@@ -623,7 +743,8 @@ class AgentConfigCommandProcessorTest {
         onRuntimeUnavailable = onRuntimeUnavailable,
         onReloadRejected = onReloadRejected,
         awaitPreviousShutdown = awaitPreviousShutdown,
-        delayBeforeRetry = delayBeforeRetry
+        delayBeforeRetry = delayBeforeRetry,
+        stopForUnusableConfiguration = stopForUnusableConfiguration
     )
 
     private fun configWithShell(server: String, shellEnabled: Boolean) = AgentConfig(

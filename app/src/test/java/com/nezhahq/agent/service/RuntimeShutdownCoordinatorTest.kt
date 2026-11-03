@@ -1,11 +1,15 @@
 package com.nezhahq.agent.service
 
 import com.nezhahq.agent.SilentLoggerRule
+import com.nezhahq.agent.service.keepalive.KeepAliveCloseWaiter
 import com.nezhahq.agent.service.keepalive.KeepAliveController
 import com.nezhahq.agent.service.keepalive.KeepAliveResource
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Rule
 import org.junit.Test
 
@@ -19,7 +23,7 @@ class RuntimeShutdownCoordinatorTest {
         val coordinator = RuntimeShutdownCoordinator(
             cancelAndJoinWork = { events += "cancel-and-join-tasks-and-streams" },
             closeNetwork = { events += "unregister-network" },
-            closeKeepAlive = { events += "close-keepalive" },
+            closeKeepAlive = { events += "close-keepalive"; true },
             closeGrpc = { events += "close-channel" }
         )
 
@@ -43,7 +47,7 @@ class RuntimeShutdownCoordinatorTest {
         val coordinator = RuntimeShutdownCoordinator(
             cancelAndJoinWork = { error("work teardown failed") },
             closeNetwork = { events += "unregister-network" },
-            closeKeepAlive = { events += "close-keepalive" },
+            closeKeepAlive = { events += "close-keepalive"; true },
             closeGrpc = { events += "close-channel" }
         )
 
@@ -70,6 +74,7 @@ class RuntimeShutdownCoordinatorTest {
             closeKeepAlive = {
                 events += "close-keepalive"
                 if (keepAliveFailuresLeft-- > 0) error("keep-alive teardown failed")
+                true
             },
             closeGrpc = { events += "close-channel" }
         )
@@ -105,7 +110,7 @@ class RuntimeShutdownCoordinatorTest {
         val coordinator = RuntimeShutdownCoordinator(
             cancelAndJoinWork = { events += "work-joined" },
             closeNetwork = { events += "network-closed" },
-            closeKeepAlive = { assertTrue(keepAlive.closeWithin(2_000)) },
+            closeKeepAlive = { keepAlive.closeWithin(2_000) },
             closeGrpc = { events += "channel-closed" }
         )
 
@@ -113,6 +118,38 @@ class RuntimeShutdownCoordinatorTest {
         coordinator.close()
 
         assertEquals(4, auxiliaryAttempts)
+        assertEquals(listOf("work-joined", "network-closed", "channel-closed"), events)
+    }
+
+    @Test
+    fun keepAliveTimeoutReportFailureCannotBlockCoreCleanupOrRepeatTheCancelledAuxiliaryScope() = runBlocking {
+        val cleanupScope = CoroutineScope(coroutineContext + SupervisorJob())
+        var waits = 0
+        var reports = 0
+        val resource = object : KeepAliveResource {
+            override suspend fun setEnabled(enabled: Boolean) = Unit
+            override suspend fun close() = Unit
+        }
+        val keepAlive = KeepAliveController(
+            resource, resource, resource, resource,
+            cleanupScope = cleanupScope,
+            closeWaiter = KeepAliveCloseWaiter { _, _ -> waits++; false }
+        )
+        val events = mutableListOf<String>()
+        val coordinator = RuntimeShutdownCoordinator(
+            cancelAndJoinWork = { events += "work-joined" },
+            closeNetwork = { events += "network-closed" },
+            closeKeepAlive = { keepAlive.closeWithin(100) },
+            closeGrpc = { events += "channel-closed" },
+            onKeepAliveCloseIncomplete = { reports++; error("timeout logger failed") }
+        )
+
+        coordinator.close()
+        coordinator.close()
+
+        assertFalse(cleanupScope.isActive)
+        assertEquals(1, waits)
+        assertEquals(1, reports)
         assertEquals(listOf("work-joined", "network-closed", "channel-closed"), events)
     }
 }

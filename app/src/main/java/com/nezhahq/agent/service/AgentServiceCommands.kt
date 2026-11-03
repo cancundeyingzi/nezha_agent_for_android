@@ -7,9 +7,12 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -92,7 +95,8 @@ internal class AgentConfigCommandProcessor(
     private val onReloadRejected: (Throwable) -> Unit,
     private val awaitPreviousShutdown: suspend () -> Unit = {},
     private val retryPolicy: StartRetryPolicy = StartRetryPolicy(),
-    private val delayBeforeRetry: suspend (Long) -> Unit = { delay(it) }
+    private val delayBeforeRetry: suspend (Long) -> Unit = { delay(it) },
+    private val stopForUnusableConfiguration: () -> Unit = {}
 ) {
     private val requests = Channel<Unit>(Channel.CONFLATED)
     private val pendingMode = PendingApplyMode()
@@ -170,7 +174,7 @@ internal class AgentConfigCommandProcessor(
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (failure: Throwable) {
-            if (controller.isRunning) onReloadRejected(failure) else scheduleRetry(failure)
+            if (controller.isRunning) report { onReloadRejected(failure) } else scheduleRetry(failure)
         }
     }
 
@@ -181,19 +185,39 @@ internal class AgentConfigCommandProcessor(
     }
 
     /** A live runtime keeps serving, so a configuration that cannot be read is not fatal yet. */
-    private fun reportConfigurationFailure(failure: Throwable) {
-        if (controller.isRunning) onReloadRejected(failure) else onConfigurationUnusable(failure)
+    private suspend fun reportConfigurationFailure(failure: Throwable) {
+        currentCoroutineContext().ensureActive()
+        if (controller.isRunning) {
+            report { onReloadRejected(failure) }
+        } else {
+            stopForUnusableConfiguration()
+            report { onConfigurationUnusable(failure) }
+        }
     }
 
-    private fun scheduleRetry(failure: Throwable) {
+    private suspend fun scheduleRetry(failure: Throwable) {
+        currentCoroutineContext().ensureActive()
         if (closed.get()) return
         val retryDelayMillis = retryPolicy.nextDelayMillis()
-        onRuntimeUnavailable(failure, retryDelayMillis)
-        val scheduled = scope.launch {
+        val scheduled = scope.launch(start = CoroutineStart.LAZY) {
             delayBeforeRetry(retryDelayMillis)
             enqueue(ConfigApplyMode.RELOAD)
         }
-        synchronized(retryLock) { retryJob = scheduled }
+        synchronized(retryLock) {
+            if (closed.get()) {
+                scheduled.cancel()
+                return
+            }
+            retryJob = scheduled
+        }
+        scheduled.start()
+        report { onRuntimeUnavailable(failure, retryDelayMillis) }
+    }
+
+    private suspend fun report(action: () -> Unit) {
+        currentCoroutineContext().ensureActive()
+        reportLifecycleEvent(action)
+        currentCoroutineContext().ensureActive()
     }
 
     private fun cancelPendingRetry() {

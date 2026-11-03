@@ -190,10 +190,12 @@ internal class AgentRuntime(
             networkRegistration = null
         },
         closeKeepAlive = {
-            val closed = keepAliveController.closeWithin(KEEP_ALIVE_CLOSE_TIMEOUT_MILLIS)
-            if (!closed) Logger.e("AgentRuntime: 保活资源清理超时，继续其余运行时清理")
+            keepAliveController.closeWithin(KEEP_ALIVE_CLOSE_TIMEOUT_MILLIS)
         },
-        closeGrpc = grpcConnection::close
+        closeGrpc = grpcConnection::close,
+        onKeepAliveCloseIncomplete = {
+            Logger.e("AgentRuntime: 保活资源清理超时，继续其余运行时清理")
+        }
     )
 
     override suspend fun start() {

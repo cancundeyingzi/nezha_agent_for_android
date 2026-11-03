@@ -327,7 +327,7 @@ class AgentRuntimeControllerTest {
         val coordinator = RuntimeShutdownCoordinator(
             cancelAndJoinWork = { supervisor.cancelAndJoin() },
             closeNetwork = {},
-            closeKeepAlive = {},
+            closeKeepAlive = { true },
             closeGrpc = {}
         )
         val controller = AgentRuntimeController(AgentRuntimeFactory {
@@ -398,6 +398,74 @@ class AgentRuntimeControllerTest {
         controller.stop()
 
         assertEquals(listOf("authorize=true", "release-shell"), events)
+    }
+
+    @Test
+    fun finalCleanupReportFailureDoesNotInvalidateSuccessfulProcessCleanup() = runBlocking {
+        var runtimeStops = 0
+        var finalCleanups = 0
+        var reports = 0
+        val controller = AgentRuntimeController(
+            factory = AgentRuntimeFactory { RecordingRuntime(onStop = { runtimeStops++ }) },
+            finalCleanup = { finalCleanups++ },
+            onFinalCleanupComplete = { reports++; error("success logger failed") }
+        )
+        controller.reload(config("running"))
+
+        controller.stop()
+        controller.stop()
+
+        assertFalse(controller.isRunning)
+        assertEquals(1, runtimeStops)
+        assertEquals(1, finalCleanups)
+        assertEquals(1, reports)
+    }
+
+    @Test
+    fun terminalStopRestoresCallerCancellationAfterBothCleanupPhasesAndRetainsFailures() = runBlocking {
+        for (failFirstStop in listOf(false, true)) {
+            val stopping = CompletableDeferred<Unit>()
+            val finishStop = CompletableDeferred<Unit>()
+            val outcome = CompletableDeferred<Throwable?>()
+            var stops = 0
+            var finalCleanups = 0
+            val controller = AgentRuntimeController(
+                factory = AgentRuntimeFactory {
+                    RecordingRuntime(onStop = {
+                        stops++
+                        stopping.complete(Unit)
+                        finishStop.await()
+                        if (failFirstStop && stops == 1) error("cleanup failed during cancellation")
+                    })
+                },
+                finalCleanup = { finalCleanups++ }
+            )
+            controller.reload(config("running"))
+            val stop = launch {
+                outcome.complete(runCatching { controller.stop() }.exceptionOrNull())
+            }
+
+            try {
+                withTimeout(2_000) { stopping.await() }
+                stop.cancel()
+                assertFalse(stop.isCompleted)
+                finishStop.complete(Unit)
+
+                val failure = withTimeout(2_000) { outcome.await() }
+                withTimeout(2_000) { stop.join() }
+                assertTrue(failure is CancellationException)
+                assertEquals(1, finalCleanups)
+                assertFalse(controller.isRunning)
+
+                controller.stop()
+                assertEquals(if (failFirstStop) 2 else 1, stops)
+                assertEquals(1, finalCleanups)
+            } finally {
+                finishStop.complete(Unit)
+                stop.cancelAndJoin()
+                controller.stop()
+            }
+        }
     }
 
     private class RecordingRuntime(
