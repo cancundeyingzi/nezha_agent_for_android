@@ -21,7 +21,7 @@ internal class ReadOnlyLegacyPreferencesContext(
     }
 }
 
-/** No listener events or editor exist because this source is an immutable, already parsed copy. */
+/** Immutable source; Tink may obtain an Editor handle, but every mutation/commit is rejected. */
 internal class ReadOnlyLegacyPreferences(values: ConfigurationValues) : SharedPreferences {
     private val values = values.entries
 
@@ -38,11 +38,27 @@ internal class ReadOnlyLegacyPreferences(values: ConfigurationValues) : SharedPr
     override fun getFloat(key: String?, defValue: Float): Float = value(key)?.let { it as Float } ?: defValue
     override fun getBoolean(key: String?, defValue: Boolean): Boolean = value(key)?.let { it as Boolean } ?: defValue
 
-    override fun edit(): SharedPreferences.Editor =
-        throw UnsupportedOperationException("Legacy preferences snapshot is read-only")
+    // AndroidKeysetManager eagerly constructs its writer even when it only reads an existing
+    // keyset. Its constructor calls edit(); rejecting the handle would reject valid migrations.
+    override fun edit(): SharedPreferences.Editor = ReadOnlyEditor
 
     override fun registerOnSharedPreferenceChangeListener(listener: SharedPreferences.OnSharedPreferenceChangeListener?) = Unit
     override fun unregisterOnSharedPreferenceChangeListener(listener: SharedPreferences.OnSharedPreferenceChangeListener?) = Unit
 
     private fun value(key: String?): Any? = if (key == null) null else values[key]
+
+    private object ReadOnlyEditor : SharedPreferences.Editor {
+        override fun putString(key: String?, value: String?): SharedPreferences.Editor = reject()
+        override fun putStringSet(key: String?, values: Set<String>?): SharedPreferences.Editor = reject()
+        override fun putInt(key: String?, value: Int): SharedPreferences.Editor = reject()
+        override fun putLong(key: String?, value: Long): SharedPreferences.Editor = reject()
+        override fun putFloat(key: String?, value: Float): SharedPreferences.Editor = reject()
+        override fun putBoolean(key: String?, value: Boolean): SharedPreferences.Editor = reject()
+        override fun remove(key: String?): SharedPreferences.Editor = reject()
+        override fun clear(): SharedPreferences.Editor = reject()
+        override fun commit(): Boolean = reject()
+        override fun apply(): Unit = reject()
+
+        private fun reject(): Nothing = throw UnsupportedOperationException("Legacy preferences snapshot is read-only")
+    }
 }

@@ -10,7 +10,7 @@ import org.junit.rules.TemporaryFolder
 class ReadOnlyLegacyPreferencesTest {
     @get:Rule val temporaryFolder = TemporaryFolder()
 
-    @Test fun decoderCanReadEveryPreferenceTypeWithoutObtainingAnEditor() {
+    @Test fun decoderCanReadEveryPreferenceTypeAndObtainReadOnlyEditor() {
         val snapshot = ReadOnlyLegacyPreferences(ConfigurationValues.from(mapOf(
             "keyset" to "serialized-keyset", "int" to 7, "long" to 8L, "float" to 1.5f,
             "boolean" to true, "set" to setOf("one", "two")
@@ -23,7 +23,28 @@ class ReadOnlyLegacyPreferencesTest {
         assertEquals(setOf("one", "two"), snapshot.getStringSet("set", null))
         assertFalse(snapshot.contains("missing"))
         assertNull(snapshot.getString("missing", null))
-        assertThrows(UnsupportedOperationException::class.java) { snapshot.edit() }
+        assertNotNull(snapshot.edit())
+    }
+
+    @Test fun everyEditorMutationAndCommitIsRejectedWithoutChangingTheSnapshot() {
+        val snapshot = ReadOnlyLegacyPreferences(ConfigurationValues.from(mapOf("key" to "original")))
+        val editor = snapshot.edit()
+        val mutations: List<() -> Any?> = listOf(
+            { editor.putString("key", "replacement") },
+            { editor.putStringSet("key", setOf("replacement")) },
+            { editor.putInt("key", 1) },
+            { editor.putLong("key", 1L) },
+            { editor.putFloat("key", 1f) },
+            { editor.putBoolean("key", true) },
+            { editor.remove("key") },
+            { editor.clear() },
+            { editor.commit() },
+            { editor.apply() }
+        )
+        mutations.forEach { mutation ->
+            assertThrows(UnsupportedOperationException::class.java) { mutation() }
+            assertEquals(mapOf("key" to "original"), snapshot.all)
+        }
     }
 
     @Test fun wrongKeysetTypeFailsInsteadOfLookingMissingAndGeneratingKeys() {
@@ -54,7 +75,7 @@ class ReadOnlyLegacyPreferencesTest {
         val backupBytes = backup.readBytes()
         val source = ReadOnlyLegacyPreferences(SharedPreferencesFiles(directory, "encrypted").readValues())
         assertEquals("backup", source.getString("keyset", null))
-        assertThrows(UnsupportedOperationException::class.java) { source.edit() }
+        assertThrows(UnsupportedOperationException::class.java) { source.edit().putString("keyset", "modified") }
         assertArrayEquals(currentBytes, current.readBytes())
         assertArrayEquals(backupBytes, backup.readBytes())
         backup.writeText("<map><string")
