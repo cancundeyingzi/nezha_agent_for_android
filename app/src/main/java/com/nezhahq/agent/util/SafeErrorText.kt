@@ -89,7 +89,9 @@ internal object SafeLogText {
         Regex("$DNS_LABEL(?:[.。．｡]$DNS_LABEL)*[.。．｡]$DNS_LAST_LABEL"),
         Regex("(?<![0-9])(?:[0-9]{1,3}\\.){3}[0-9]{1,3}"),
         Regex("(?i)(?<![a-z0-9])(?:[a-f0-9]{0,4}:){2,}[a-f0-9:.%]*"),
-        Regex("[A-Za-z]:[\\\\/]|\\\\\\\\|(?:^|[\\s(（\"'=：:])(?:\\.{1,2}[\\\\/]|/)[^\\s]*"),
+        // Root separators identify even single-component paths, regardless of preceding quotes.
+        // Drive/relative matches below can identify an earlier sensitive start than the separator.
+        Regex("[A-Za-z]:[\\\\/]|[\\\\/]"),
         // A relative/home path is sensitive even without a path= key or an absolute prefix.
         Regex("[\\p{L}\\p{N}\\p{M}\\p{S}_~.-]+[\\\\/]")
     )
