@@ -102,9 +102,9 @@ internal class ManagedGrpcConnection(
         check(channel == null) { "The previous gRPC channel has not terminated yet." }
         when (transportMode) {
             GrpcTransportMode.TLS ->
-                Logger.i("Grpc: 使用 TLS 加密连接 ${config.server}:${config.port}")
+                Logger.i("Grpc: 使用 TLS 加密连接")
             GrpcTransportMode.PLAINTEXT ->
-                Logger.i("Grpc: 使用显式明文连接 ${config.server}:${config.port}")
+                Logger.i("Grpc: 使用显式明文连接")
         }
         val newChannel = try {
             channelFactory.create(config, transportMode)

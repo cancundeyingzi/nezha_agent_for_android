@@ -341,7 +341,7 @@ class SystemStateCollector(
         } catch (e: Exception) {
             // Android 9+ SELinux 拒绝属已知的不可恢复限制，只在首次失败时打印一次警告
             if (!loadAvgWarningLogged) {
-                Logger.i("StateCollector: 普通模式无法读取 /proc/loadavg（SELinux 限制），Load 数据不可用")
+                Logger.i("StateCollector: 普通模式无法读取系统负载（SELinux 限制），Load 数据不可用")
                 loadAvgWarningLogged = true
             }
             null
@@ -387,7 +387,7 @@ class SystemStateCollector(
                 }
             }
         } catch (e: Exception) {
-            Logger.e("StateCollector: 读取 /proc/meminfo Swap 失败", e)
+            Logger.e("StateCollector: 读取 Swap 信息失败", e)
         }
         // /proc/meminfo 单位为 kB，转换为 Bytes
         return (swapTotal - swapFree).coerceAtLeast(0L) * 1024L
@@ -438,7 +438,7 @@ class SystemStateCollector(
             File("/proc").listFiles { f -> f.name.all { it.isDigit() } && f.isDirectory }
                 ?.size?.toLong() ?: 0L
         } catch (e: Exception) {
-            Logger.e("StateCollector: 枚举 /proc 目录统计进程数失败", e)
+            Logger.e("StateCollector: 统计进程数失败", e)
             0L
         }
     }
@@ -516,7 +516,7 @@ class SystemStateCollector(
                 // 每个文件首行为列标题（也含换行符），减 1 得实际条目数
                 total += (newlines - 1L).coerceAtLeast(0L)
             } catch (e: Exception) {
-                Logger.e("StateCollector: 字节扫描 ${file.name} 失败", e)
+                Logger.e("StateCollector: 指标文件字节扫描失败", e)
             }
         }
         return total

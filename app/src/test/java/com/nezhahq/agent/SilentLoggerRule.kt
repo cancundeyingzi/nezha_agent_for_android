@@ -9,14 +9,9 @@ import org.junit.runners.model.Statement
 /**
  * Points [Logger]'s platform write at a recorder instead of `android.util.Log` for one test.
  *
- * Unit tests run without the Android framework, so `android.util.Log` throws "not mocked" — add
- * this rule to any test whose code under test logs. It is worth knowing why the failure is hard to
- * recognise without it: the exception surfaces far from its cause, and a broad `catch` upstream can
- * turn it into a plausible-looking result. `TaskExecutor` did exactly that, reporting the mocking
- * error to the Dashboard as the task's output.
- *
- * Recorded lines are exposed so a test may assert on them, but the usual reason to add the rule is
- * simply to let logging happen.
+ * Android logging is unavailable in JVM tests. Logger now isolates platform failures; this recorder
+ * keeps the actual safe platform output observable instead of silently swallowing a mocked-API
+ * error. The sink receives strings only, matching Logcat's production security boundary.
  */
 class SilentLoggerRule : TestRule {
     private val recorded = mutableListOf<String>()
@@ -41,7 +36,7 @@ class SilentLoggerRule : TestRule {
     private inner class RecordingSink : PlatformLogSink {
         override fun info(message: String) = record(message)
 
-        override fun error(message: String, throwable: Throwable?) = record(message)
+        override fun error(message: String) = record(message)
     }
 
     private fun record(message: String) {

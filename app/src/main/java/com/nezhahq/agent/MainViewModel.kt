@@ -41,6 +41,7 @@ import com.nezhahq.agent.ui.ParsedUuid
 import com.nezhahq.agent.ui.UiEvent
 import com.nezhahq.agent.ui.UiEvents
 import com.nezhahq.agent.util.Logger
+import com.nezhahq.agent.util.SafeErrorText
 import com.nezhahq.agent.util.RootShell
 import com.nezhahq.agent.util.awaitInitialConfiguration
 import com.nezhahq.agent.util.ConfigurationOperationGate
@@ -90,6 +91,11 @@ class MainViewModel(
     private val defaults = ConfigurationSnapshot.DEFAULTS
 
     private val configurationReadiness = application.appContainer.configurationReadiness
+
+    private val localDiagnostics = application.appContainer.localDiagnostics
+    val diagnosticState = localDiagnostics.state
+
+    fun setLocalDiagnostics(enabled: Boolean) = localDiagnostics.setEnabled(enabled)
 
     /**
      * 首次配置加载是否仍在进行。
@@ -510,20 +516,22 @@ class MainViewModel(
                                 }
                             },
                             onFailure = { throwable ->
+                                Logger.e("MainViewModel: 模拟设备上报失败", throwable)
                                 withContext(Dispatchers.Main) {
                                     simulatorFailureCount += 1
                                     simulatorLastStatus =
-                                        "上次失败：${throwable.toSimulatorMessage()}"
+                                        SafeErrorText.display("上次失败", throwable)
                                 }
                             }
                         )
                     } catch (e: CancellationException) {
                         throw e
                     } catch (throwable: Throwable) {
+                        Logger.e("MainViewModel: 模拟器异常停止", throwable)
                         withContext(Dispatchers.Main) {
                             simulatorRunning = false
                             simulatorLastStatus =
-                                "模拟器异常停止：${throwable.toSimulatorMessage()}"
+                                SafeErrorText.display("模拟器异常停止", throwable)
                         }
                     }
                 }
@@ -806,7 +814,8 @@ class MainViewModel(
                 // 吞掉它还会让协程在被取消后继续往下跑。
                 throw e
             } catch (e: Exception) {
-                instantTestResult = "❌ 采集失败: ${e.message}"
+                Logger.e("MainViewModel: 即时采集失败", e)
+                instantTestResult = SafeErrorText.display("❌ 采集失败", e)
             } finally {
                 isTestRunning = false
             }
@@ -861,7 +870,8 @@ class MainViewModel(
             }
         } catch (e: Exception) {
             shizukuStatusText = "⚠️ Shizuku 检测异常"
-            notifyLong("Shizuku 检测失败：${e.message}\n如设备已 Root 可忽略此提示。")
+            Logger.e("MainViewModel: Shizuku 检测失败", e)
+            notifyLong(SafeErrorText.display("Shizuku 检测失败", e) + "\n如设备已 Root 可忽略此提示。")
         }
     }
 
@@ -1149,11 +1159,3 @@ private const val MAX_CLIPBOARD_CONFIG_CHARS = 64 * 1024
 private const val SIMULATOR_IDLE_STATUS = "未启动"
 
 private fun newUuid(): String = java.util.UUID.randomUUID().toString()
-
-private fun Throwable.toSimulatorMessage(): String {
-    val message = generateSequence(this) { it.cause }
-        .mapNotNull { it.message?.takeIf(String::isNotBlank) }
-        .firstOrNull()
-        ?: this::class.java.simpleName
-    return message.replace('\n', ' ').take(120)
-}

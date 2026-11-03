@@ -701,7 +701,7 @@ class KeepAliveControllerTest {
             throw IllegalStateException("platform info sink failed")
         }
 
-        override fun error(message: String, throwable: Throwable?) {
+        override fun error(message: String) {
             errors.incrementAndGet()
             beforeError()
             throw IllegalStateException("platform error sink failed")

@@ -16,7 +16,7 @@ import java.util.Locale
  */
 interface PlatformLogSink {
     fun info(message: String)
-    fun error(message: String, throwable: Throwable?)
+    fun error(message: String)
 }
 
 private object AndroidLogSink : PlatformLogSink {
@@ -26,8 +26,8 @@ private object AndroidLogSink : PlatformLogSink {
         android.util.Log.i(TAG, message)
     }
 
-    override fun error(message: String, throwable: Throwable?) {
-        android.util.Log.e(TAG, message, throwable)
+    override fun error(message: String) {
+        android.util.Log.e(TAG, message)
     }
 }
 
@@ -85,6 +85,9 @@ object Logger {
     @Volatile
     internal var platformSink: PlatformLogSink = AndroidLogSink
 
+    @Volatile
+    internal var diagnostics: LocalDiagnostics? = null
+
     // ══════════════════════════════════════════════════════════════════════════
     // 公开 API
     // ══════════════════════════════════════════════════════════════════════════
@@ -94,33 +97,15 @@ object Logger {
      *
      * @param message 日志消息文本
      */
-    fun i(message: String) {
-        // SimpleDateFormat 非线程安全，需在 synchronized 中格式化时间
-        val formattedLog = synchronized(this) {
-            val time = dateFormat.format(Date())
-            "[$time] $message"
-        }
-        addLogWithDedup(formattedLog, message)
-        platformSink.info(message)
-    }
+    fun i(message: String, throwable: Throwable? = null) = write(message, throwable, isError = false)
 
     /**
      * 记录 ERROR 级别日志。
      *
      * @param message 日志消息文本
-     * @param throwable 可选的异常对象（其 message 会附加到日志末尾）
+     * @param throwable 仅提取安全类别和状态码；正文永不进入 UI、剪贴板或 Logcat。
      */
-    fun e(message: String, throwable: Throwable? = null) {
-        val err = throwable?.let { " - ${it.message ?: it.javaClass.simpleName}" } ?: ""
-        // SimpleDateFormat 非线程安全，需在 synchronized 中格式化时间
-        val formattedLog = synchronized(this) {
-            val time = dateFormat.format(Date())
-            "[$time] ERROR: $message$err"
-        }
-        // 去重仅基于主消息，忽略异常详情（同一个方法产生的异常消息通常相同）
-        addLogWithDedup(formattedLog, message)
-        platformSink.error(message, throwable)
-    }
+    fun e(message: String, throwable: Throwable? = null) = write(message, throwable, isError = true)
 
     /**
      * 获取所有日志的完整拼接字符串（用于复制到剪贴板等一次性场景）。
@@ -138,21 +123,19 @@ object Logger {
     // 内部实现
     // ══════════════════════════════════════════════════════════════════════════
 
-    /**
-     * 带去重/节流逻辑的日志追加。
-     *
-     * 去重/淘汰/序号的具体规则见 [LogBuffer]。此处只负责：用 synchronized 串行化并发写
-     * （[LogBuffer] 自身不加锁，沿用旧实现由 Logger 统一保护的约定），拿到新快照后发布到
-     * [_logs] 触发 Compose 重组。
-     *
-     * @param formattedLog 带时间戳的完整日志字符串（展示用）
-     * @param rawMessage 不含时间戳的原始消息（用于去重比对）
-     */
-    private fun addLogWithDedup(formattedLog: String, rawMessage: String) {
-        val snapshot = synchronized(this) {
-            buffer.add(formattedLog, rawMessage)
+    private fun write(message: String, throwable: Throwable?, isError: Boolean) {
+        val description = runCatching { SafeLogText.message(message) }.getOrDefault("日志信息不可用")
+        val category = throwable?.let { " (Error=${SafeErrorText.describe(it)})" }.orEmpty()
+        val safeMessage = description + category
+        synchronized(this) {
+            val time = dateFormat.format(Date())
+            val level = if (isError) "ERROR: " else ""
+            // Mutation and publication share the lock; an older concurrent snapshot cannot win.
+            _logs.value = buffer.add("[$time] $level$safeMessage", "$level$description")
         }
-        _logs.value = snapshot
+        // A broken output sink must never turn successful business work into a failure.
+        runCatching { if (isError) platformSink.error(safeMessage) else platformSink.info(safeMessage) }
+        runCatching { diagnostics?.record(safeMessage, throwable) }
     }
 }
 

@@ -7,7 +7,9 @@ import com.nezhahq.agent.grpc.ConnectionStateHolder
 import com.nezhahq.agent.util.ConfigStore
 import com.nezhahq.agent.util.ConfigurationReadiness
 import com.nezhahq.agent.util.Logger
+import com.nezhahq.agent.util.LocalDiagnostics
 import com.nezhahq.agent.util.SharedPreferencesConfigRepository
+import java.io.File
 
 /**
  * The application's object graph, assembled once in [NezhaAgentApplication].
@@ -18,6 +20,12 @@ import com.nezhahq.agent.util.SharedPreferencesConfigRepository
  */
 class AppContainer(context: Context) {
     private val appContext = context.applicationContext
+
+    val localDiagnostics = LocalDiagnostics(directory = { File(appContext.noBackupFilesDir, "diagnostics") })
+
+    init {
+        Logger.diagnostics = localDiagnostics
+    }
 
     val configRepository: ConfigRepository = SharedPreferencesConfigRepository(appContext)
 

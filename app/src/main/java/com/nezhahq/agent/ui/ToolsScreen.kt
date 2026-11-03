@@ -48,6 +48,7 @@ fun ToolsScreenContent(
     contentPadding: PaddingValues = PaddingValues()
 ) {
     val context = LocalContext.current
+    val diagnosticState by vm.diagnosticState.collectAsState()
     val scrollState = rememberScrollState()
     // 权限刷新要读盘（getAllPermissionStatus 内部会读配置存储），必须在 IO 上执行，
     // 故需要一个协程作用域给下面几处“事件驱动的刷新”使用。
@@ -143,6 +144,24 @@ fun ToolsScreenContent(
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         Text("工具与设置", style = MaterialTheme.typography.headlineMedium)
+
+        EtherCard {
+            Text("问题诊断", style = MaterialTheme.typography.titleMedium)
+            Spacer(modifier = Modifier.height(8.dp))
+            EtherToggleRow(
+                checked = diagnosticState.enabled,
+                onCheckedChange = vm::setLocalDiagnostics,
+                title = "本次运行保存本地诊断",
+                description = "默认关闭，重启后失效。仅在应用私有空间保存有限调用栈，最长 24 小时、总量 256 KB；关闭后清理。"
+            )
+            if (diagnosticState.cleaning) {
+                Text("正在清理上一轮诊断…", style = MaterialTheme.typography.bodySmall)
+            }
+            diagnosticState.error?.let { error ->
+                Text(error, color = LgError, style = MaterialTheme.typography.bodySmall)
+                GlassButtonSecondary(onClick = { vm.setLocalDiagnostics(false) }) { Text("重试清理") }
+            }
+        }
 
         // ══════════════════════════════════════════════════════════════════
         // 娱乐模拟设备

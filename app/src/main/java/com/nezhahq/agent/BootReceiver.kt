@@ -45,7 +45,7 @@ class BootReceiver : BroadcastReceiver() {
         val pendingResult = goAsync()
         thread(name = "nezha-boot-receiver", isDaemon = true) {
             try {
-                startAgentIfConfigured(appContext, action)
+                startAgentIfConfigured(appContext)
             } catch (failure: Throwable) {
                 Logger.e("BootReceiver: 自动启动判定失败", failure)
             } finally {
@@ -54,26 +54,26 @@ class BootReceiver : BroadcastReceiver() {
         }
     }
 
-    private fun startAgentIfConfigured(context: Context, action: String) {
+    private fun startAgentIfConfigured(context: Context) {
         val repository = context.appContainer.configRepository
         if (!repository.storageStatus().isUsable) {
-            Logger.e("BootReceiver: 收到 $action，但配置存储不可用，拒绝自动启动。")
+            Logger.e("BootReceiver: 收到系统启动广播，但配置存储不可用，拒绝自动启动。")
             return
         }
 
         // 若用户尚未配置探针，无需自动启动
         if (!repository.hasCompleteConnection()) {
-            Logger.i("BootReceiver: 收到 $action，但探针尚未配置，跳过自动启动。")
+            Logger.i("BootReceiver: 收到系统启动广播，但探针尚未配置，跳过自动启动。")
             return
         }
 
         // 若用户未启用自启动功能，跳过
         if (!repository.loadAutoStartState().enabled) {
-            Logger.i("BootReceiver: 收到 $action，但用户未启用自启动开关，跳过自动启动。")
+            Logger.i("BootReceiver: 收到系统启动广播，但用户未启用自启动开关，跳过自动启动。")
             return
         }
 
-        Logger.i("BootReceiver: 收到 $action，正在自动恢复探针后台服务...")
+        Logger.i("BootReceiver: 收到系统启动广播，正在自动恢复探针后台服务...")
         AgentService.startOrReload(context)
     }
 }

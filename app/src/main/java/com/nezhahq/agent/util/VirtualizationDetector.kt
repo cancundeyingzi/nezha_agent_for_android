@@ -57,7 +57,7 @@ object VirtualizationDetector {
         cachedResult = result
 
         if (result.isNotEmpty()) {
-            Logger.i("VirtualizationDetector: 检测到虚拟化环境 → $result")
+            Logger.i("VirtualizationDetector: 检测到虚拟化环境")
         } else {
             Logger.i("VirtualizationDetector: 未检测到虚拟化特征，判定为实体机")
         }
@@ -143,7 +143,7 @@ object VirtualizationDetector {
 
             null // 未命中
         } catch (e: Exception) {
-            Logger.i("VirtualizationDetector: 读取 /proc/cpuinfo 失败: ${e.message}")
+            Logger.i("VirtualizationDetector: 读取 CPU 信息失败", e)
             null
         }
     }
@@ -222,7 +222,7 @@ object VirtualizationDetector {
             }
 
         } catch (e: Exception) {
-            Logger.i("VirtualizationDetector: Build 属性检测异常: ${e.message}")
+            Logger.i("VirtualizationDetector: Build 属性检测异常", e)
         }
         return null
     }
@@ -275,7 +275,7 @@ object VirtualizationDetector {
                 return "Emulator"
             }
         } catch (e: Exception) {
-            Logger.i("VirtualizationDetector: 特征文件检测异常: ${e.message}")
+            Logger.i("VirtualizationDetector: 特征文件检测异常", e)
         }
         return null
     }
@@ -312,7 +312,7 @@ object VirtualizationDetector {
 
             null
         } catch (e: Exception) {
-            Logger.i("VirtualizationDetector: 传感器检测异常: ${e.message}")
+            Logger.i("VirtualizationDetector: 传感器检测异常", e)
             null
         }
     }
@@ -357,7 +357,7 @@ object VirtualizationDetector {
 
             null
         } catch (e: Exception) {
-            Logger.i("VirtualizationDetector: 系统属性检测异常: ${e.message}")
+            Logger.i("VirtualizationDetector: 系统属性检测异常", e)
             null
         }
     }

@@ -377,7 +377,7 @@ class GpuCollector internal constructor(
             val renderer = GLES20.glGetString(GLES20.GL_RENDERER) ?: "unknown"
             val vendor = GLES20.glGetString(GLES20.GL_VENDOR) ?: "unknown"
 
-            Logger.i("GpuCollector: GPU 型号检测成功 — Renderer='$renderer', Vendor='$vendor'")
+            Logger.i("GpuCollector: GPU 型号检测成功")
             return Pair(renderer, vendor)
         } catch (e: Exception) {
             Logger.e("GpuCollector: EGL GPU 信息查询异常", e)
@@ -433,7 +433,7 @@ class GpuCollector internal constructor(
             if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
                 val result = probeDirectRead(state)
                 if (result != null) {
-                    Logger.i("GpuCollector: P0 直读成功 (路径=${state.sysfsPath})")
+                    Logger.i("GpuCollector: P0 直读成功")
                     return GpuProbeResult(GpuCollectionStrategy.DIRECT, listOf(result))
                 }
             }
@@ -452,14 +452,14 @@ class GpuCollector internal constructor(
         // ── P1: Shell-FS 已知厂商路径 ────────────────────────────────────
         val p1Result = probeKnownPaths(state)
         if (p1Result != null) {
-            Logger.i("GpuCollector: P1 已知路径命中 (路径=${state.sysfsPath})")
+            Logger.i("GpuCollector: P1 已知路径命中")
             return GpuProbeResult(GpuCollectionStrategy.SHELL_FS, listOf(p1Result))
         }
 
         // ── P1.5: 动态扫描 /sys ──────────────────────────────────────────
         val p15Result = probeDynamicScan(state)
         if (p15Result != null) {
-            Logger.i("GpuCollector: P1.5 动态扫描命中 (路径=${state.sysfsPath})")
+            Logger.i("GpuCollector: P1.5 动态扫描命中")
             return GpuProbeResult(GpuCollectionStrategy.SHELL_FS, listOf(p15Result))
         }
 

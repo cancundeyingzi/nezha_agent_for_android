@@ -109,7 +109,7 @@ class AgentService : Service() {
             AgentServiceCommand.RECOVER_LATEST -> commandProcessor.requestReload()
             AgentServiceCommand.REFRESH_CAPABILITIES -> commandProcessor.requestCapabilityRefresh()
             AgentServiceCommand.IGNORE ->
-                Logger.i("AgentService: ignored unknown action ${intent?.action}")
+                Logger.i("AgentService: ignored unknown action")
         }
         return decision.startResult
     }

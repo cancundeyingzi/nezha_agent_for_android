@@ -134,7 +134,7 @@ object SystemInfoCollector {
                 }
             }
         } catch (e: Exception) {
-            Logger.e("SystemInfoCollector: Root 模式读取 /proc/cpuinfo 失败，回退到普通模式", e)
+            Logger.e("SystemInfoCollector: Root 模式读取 CPU 信息失败，回退到普通模式", e)
         }
 
         // Root Shell 异常时回退到普通模式策略
@@ -162,7 +162,7 @@ object SystemInfoCollector {
                     return enhanceCpuNameWithFrequencyDirect(enhanced)
                 }
             } catch (e: Exception) {
-                Logger.i("SystemInfoCollector: Build.SOC_MODEL 不可用: ${e.message}")
+                Logger.i("SystemInfoCollector: SoC 型号不可用", e)
             }
         }
 
@@ -174,7 +174,7 @@ object SystemInfoCollector {
                 return enhanceCpuNameWithFrequencyDirect(baseName)
             }
         } catch (e: Exception) {
-            Logger.i("SystemInfoCollector: 普通模式读取 /proc/cpuinfo 失败: ${e.message}")
+            Logger.i("SystemInfoCollector: 普通模式读取 CPU 信息失败", e)
         }
 
         // 策略 3（API 31+）：回退到 Build.SOC_MODEL 单独使用
@@ -237,7 +237,7 @@ object SystemInfoCollector {
                 baseName
             }
         } catch (e: Exception) {
-            Logger.i("SystemInfoCollector: Root 模式读取 CPU 频率失败: ${e.message}")
+            Logger.i("SystemInfoCollector: Root 模式读取 CPU 频率失败", e)
             baseName
         }
     }
@@ -334,7 +334,7 @@ object SystemInfoCollector {
             val count = parseCpuOnlineRange(online)
             if (count > 0) return count
         } catch (e: Exception) {
-            Logger.i("SystemInfoCollector: Root 模式读取 cpu/online 失败: ${e.message}")
+            Logger.i("SystemInfoCollector: Root 模式读取 CPU 在线状态失败", e)
         }
 
         // 策略 2：通过 nproc 命令
@@ -343,7 +343,7 @@ object SystemInfoCollector {
             val count = nprocOutput?.trim()?.toIntOrNull()
             if (count != null && count > 0) return count
         } catch (e: Exception) {
-            Logger.i("SystemInfoCollector: Root 模式 nproc 失败: ${e.message}")
+            Logger.i("SystemInfoCollector: Root 模式 nproc 失败", e)
         }
 
         // 回退到普通模式策略
@@ -380,7 +380,7 @@ object SystemInfoCollector {
                 if (count > 0) return count
             }
         } catch (e: Exception) {
-            Logger.i("SystemInfoCollector: 枚举 cpu 目录失败: ${e.message}")
+            Logger.i("SystemInfoCollector: 枚举 CPU 目录失败", e)
         }
 
         // 最终兜底：至少 1 核
@@ -422,7 +422,7 @@ object SystemInfoCollector {
                 }
             }
         } catch (e: Exception) {
-            Logger.i("SystemInfoCollector: 解析 cpu/online 格式异常: $rangeStr")
+            Logger.i("SystemInfoCollector: CPU 在线状态格式异常", e)
             return 0
         }
         return total
@@ -451,7 +451,7 @@ object SystemInfoCollector {
             }
             swapTotalKb * 1024L
         } catch (e: Exception) {
-            Logger.e("SystemInfoCollector: 读取 /proc/meminfo SwapTotal 失败", e)
+            Logger.e("SystemInfoCollector: 读取 Swap 总容量失败", e)
             0L
         }
     }

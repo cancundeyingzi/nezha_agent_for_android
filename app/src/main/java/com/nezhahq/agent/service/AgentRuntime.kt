@@ -257,7 +257,7 @@ internal class AgentRuntime(
             appContext.cacheDir.listFiles { file ->
                 file.name.startsWith("nezha_upload_") && file.name.endsWith(".tmp")
             }?.forEach { staleFile ->
-                Logger.i("AgentRuntime: 清理残留临时文件: ${staleFile.name}")
+                Logger.i("AgentRuntime: 清理残留临时文件")
                 staleFile.delete()
             }
         } catch (cancellation: CancellationException) {

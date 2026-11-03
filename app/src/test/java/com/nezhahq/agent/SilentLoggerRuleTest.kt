@@ -17,13 +17,10 @@ class SilentLoggerRuleTest {
         Logger.i("info line")
         Logger.e("error line", IllegalStateException("cause"))
 
-        assertEquals(listOf("info line", "error line"), silentLogger.messages)
+        assertEquals(listOf("info line", "error line (Error=IllegalStateException)"), silentLogger.messages)
     }
 
-    /**
-     * The point of the rule: without it this call throws "not mocked" now that
-     * `unitTests.isReturnDefaultValues` is off.
-     */
+    /** The rule makes platform output observable without depending on Android logging stubs. */
     @Test
     fun theInstalledSinkIsNotTheAndroidOne() {
         assertNotNull(Logger.platformSink)

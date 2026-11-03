@@ -63,7 +63,7 @@ private object AndroidMountTableSource : MountTableSource {
             .filter { it.isNotBlank() }
             .toList()
     } catch (e: Exception) {
-        Logger.e("DiskCollector: Root 模式读取 /proc/mounts 失败，回退到普通读取", e)
+        Logger.e("DiskCollector: Root 模式读取挂载信息失败，回退到普通读取", e)
         emptyList()
     }
 
@@ -72,7 +72,7 @@ private object AndroidMountTableSource : MountTableSource {
             lines.filter { it.isNotBlank() }.toList()
         }
     } catch (e: Exception) {
-        Logger.e("DiskCollector: 读取 /proc/mounts 失败", e)
+        Logger.e("DiskCollector: 读取挂载信息失败", e)
         emptyList()
     }
 }
@@ -110,13 +110,13 @@ internal class DiskUsageCalculator(
 ) {
     fun getDiskInfo(isRootMode: Boolean): DiskInfo {
         val dataPartition = capacityProbe.capacityOf(internalStoragePath) ?: run {
-            Logger.e("DiskCollector: 读取 /data 分区容量失败")
+            Logger.e("DiskCollector: 读取数据分区容量失败")
             DiskInfo(0L, 0L)
         }
         val mountScan = try {
             scanMounts(isRootMode)
         } catch (e: Exception) {
-            Logger.e("DiskCollector: 扫描挂载点失败，使用 /data 基准结果", e)
+            Logger.e("DiskCollector: 扫描挂载点失败，使用数据分区基准结果", e)
             ScanResult()
         }
 
