@@ -152,7 +152,7 @@ class SystemStateCollector(
         return try {
             PrivilegedMetricsSnapshotParser.parse(RootShell.execute(PRIVILEGED_METRICS_COMMAND))
         } catch (e: Exception) {
-            Logger.e("StateCollector: Root/Shizuku 指标快照读取失败", e)
+            Logger.e("StateCollector: Root 或 Shizuku 指标快照读取失败", e)
             null
         }
     }

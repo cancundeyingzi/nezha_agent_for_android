@@ -52,23 +52,31 @@ class LoggingSecurityTest {
 
     @Test
     fun infoContextGuardCoversCredentialsAddressesPathsAndBodiesAtAllOutputs() {
-        val inputs = listOf(
-            "Authorization: Bearer credential-7319" to "credential-7319",
-            "token=token-7319" to "token-7319",
-            "{\"access_token\":\"json-secret-7319\"}" to "json-secret-7319",
-            "https://private-7319.example/api?auth=7319" to "private-7319.example",
-            "192.0.2.19:8008" to "192.0.2.19",
-            "[2001:db8:7319::1]:8008" to "2001:db8:7319",
-            "private-7319.example" to "private-7319.example",
-            "/data/user/0/private-7319/file" to "private-7319",
-            "C:\\Users\\private-7319\\file" to "private-7319",
-            "路径=relative/private-7319" to "private-7319",
-            "body={private-response-7319}" to "private-response-7319"
-        )
-        inputs.forEach { (input, marker) ->
+        sensitiveLogContextCases("7319").forEach { (input, marker) ->
             Logger.i("日志安全测试：受限上下文 $input")
             assertDefaultOutputsExclude(marker)
+            assertTrue(logs.messages.last().startsWith("日志安全测试：受限上下文"))
+            assertTrue(logs.messages.last().contains("[内容已隐藏]"))
         }
+    }
+
+    @Test
+    fun fixedBusinessDescriptionAndGrpcCodeSurviveEveryDefaultOutput() {
+        val description = "日志安全测试：Root 或 Shizuku 指标读取失败"
+        val failure = Status.PERMISSION_DENIED.withDescription("private-status-body-7319").asRuntimeException()
+        Logger.e(description, failure)
+        val outputs = listOf(Logger.logs.value.last().text, Logger.getLogString(), logs.messages.last())
+        outputs.forEach {
+            assertTrue(it.contains(description))
+            assertTrue(it.contains("Error=StatusRuntimeException, Code=PERMISSION_DENIED"))
+        }
+        assertEquals("$description（StatusRuntimeException, Code=PERMISSION_DENIED）", SafeErrorText.display(description, failure))
+        assertDefaultOutputsExclude("private-status-body-7319")
+        val stageDescription = "GpuCollector: P1.5 动态扫描命中"
+        Logger.i(stageDescription)
+        assertEquals(stageDescription, logs.messages.last())
+        assertTrue(Logger.logs.value.last().text.contains(stageDescription))
+        assertTrue(Logger.getLogString().contains(stageDescription))
     }
 
     @Test
@@ -111,7 +119,7 @@ class LoggingSecurityTest {
         try {
             val writers = (0 until 6).map { worker -> executor.submit {
                 assertTrue(start.await(2, TimeUnit.SECONDS))
-                repeat(120) { Logger.i("日志安全测试：并发 $worker/$it") }
+                repeat(120) { Logger.i("日志安全测试：并发 worker=$worker iteration=$it") }
             } }
             start.countDown()
             writers.forEach { it.get(5, TimeUnit.SECONDS) }
@@ -131,4 +139,46 @@ class LoggingSecurityTest {
         val outputs = listOf(Logger.logs.value.joinToString("\n") { it.text }, Logger.getLogString(), logs.messages.joinToString("\n"))
         markers.forEach { marker -> outputs.forEach { assertFalse("default output leaked $marker", marker in it) } }
     }
+}
+
+/** Reused against the UI, clipboard, platform sink and explicitly enabled diagnostic files. */
+internal fun sensitiveLogContextCases(marker: String): List<Pair<String, String>> {
+    val domain = "private-$marker.example"
+    val privatePath = "private-$marker"
+    return listOf(
+        "Authorization: Bearer credential-$marker" to "credential-$marker",
+        "token=token-$marker" to "token-$marker",
+        "{\"access_token\":\"json-secret-$marker\"}" to "json-secret-$marker",
+        "https://$domain/api?auth=$marker" to domain,
+        "192.0.2.19:8008" to "192.0.2.19",
+        "[2001:db8:7319::1]:8008" to "2001:db8:7319",
+        domain to domain,
+        "\"$domain\"" to domain,
+        "'$domain'" to domain,
+        "“$domain”" to domain,
+        "‘$domain’" to domain,
+        "「$domain」" to domain,
+        "$domain." to domain,
+        "$domain：8008" to domain,
+        "$domain；结束" to domain,
+        "$domain！" to domain,
+        "private-$marker.xn--fiqs8s" to "private-$marker.xn--fiqs8s",
+        "xn--bcher-kva.example" to "xn--bcher-kva.example",
+        "私有-$marker.测试" to "私有-$marker.测试",
+        "cafe\u0301-$marker.example" to "cafe\u0301-$marker.example",
+        "private-$marker。example" to privatePath,
+        "私有-$marker．测试" to "私有-$marker",
+        "private-$marker｡example" to privatePath,
+        "/data/user/0/$privatePath/file" to privatePath,
+        "C:\\Users\\$privatePath\\file" to privatePath,
+        "relative/$privatePath/file" to privatePath,
+        "~/$privatePath/file" to privatePath,
+        "./$privatePath/file" to privatePath,
+        "../$privatePath/file" to privatePath,
+        "relative\\$privatePath\\file" to privatePath,
+        "目录/私有-$marker/文件" to "私有-$marker",
+        "📁/$privatePath" to privatePath,
+        "路径=relative/$privatePath" to privatePath,
+        "body={private-response-$marker}" to "private-response-$marker"
+    )
 }

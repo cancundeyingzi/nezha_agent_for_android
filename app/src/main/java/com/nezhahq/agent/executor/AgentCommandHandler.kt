@@ -149,7 +149,7 @@ class AgentCommandHandler(private val context: Context) {
 
     private suspend fun executeAppProcesses(): String {
         if (!RootShell.isAuthorized()) {
-            Logger.i("AgentCommandHandler: 跳过用户应用进程查询，Root/Shizuku 模式未开启")
+            Logger.i("AgentCommandHandler: 跳过用户应用进程查询，Root 或 Shizuku 模式未开启")
             return buildString {
                 append("\r\n")
                 append("⚠️ 应用进程查询需要 Root/Shizuku 模式\r\n")

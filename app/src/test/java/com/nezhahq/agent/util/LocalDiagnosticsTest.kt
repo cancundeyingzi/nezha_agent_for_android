@@ -1,6 +1,7 @@
 package com.nezhahq.agent.util
 
 import com.nezhahq.agent.SilentLoggerRule
+import io.grpc.Status
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.CountDownLatch
@@ -71,6 +72,29 @@ class LocalDiagnosticsTest {
             assertNotNull(providerThread)
             assertTrue(providerThread !== callerThread)
         }
+    }
+
+    @Test
+    fun contextGuardAlsoProtectsOptInFilesWhilePreservingBusinessDescriptionAndStatusCode() = withRecorder { recorder, directory ->
+        recorder.setEnabled(true)
+        val cases = sensitiveLogContextCases("8542")
+        cases.forEach { (input, _) -> Logger.i("诊断测试：受限上下文 $input") }
+        val stageDescription = "GpuCollector: P1.5 动态扫描命中"
+        Logger.i(stageDescription)
+        val description = "诊断测试：Root 或 Shizuku 指标读取失败"
+        Logger.e(description, Status.UNAVAILABLE.withDescription("private-status-body-8542").asRuntimeException())
+        recorder.awaitIdle()
+
+        val contents = logFiles(directory).joinToString { it.readText() }
+        val outputs = listOf(Logger.logs.value.joinToString("\n") { it.text }, Logger.getLogString(), logs.messages.joinToString("\n"), contents)
+        outputs.forEach { output ->
+            cases.forEach { (_, marker) -> assertFalse("output leaked $marker", marker in output) }
+            assertFalse(output.contains("private-status-body-8542"))
+            assertTrue(output.contains(stageDescription))
+            assertTrue(output.contains(description))
+            assertTrue(output.contains("Error=StatusRuntimeException, Code=UNAVAILABLE"))
+        }
+        assertTrue(contents.contains("诊断测试：受限上下文"))
     }
 
     @Test

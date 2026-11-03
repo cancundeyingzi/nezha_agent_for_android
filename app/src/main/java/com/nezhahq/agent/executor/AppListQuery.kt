@@ -68,7 +68,7 @@ class AppListQuery(private val context: Context) {
 
         if (output.isBlank()) {
             val reason = "Root/Shizuku Shell 不可用或 dumpsys 无输出"
-            Logger.i("AppListQuery: 用户应用进程查询失败，$reason")
+            Logger.i("AppListQuery: 用户应用进程查询失败，高权限 Shell 不可用或 dumpsys 无输出")
             return@withContext ProcessQueryResult.Failure(reason)
         }
 

@@ -22,7 +22,7 @@ object SafeErrorText {
                 else -> null
             }
         }
-        if (code == null) type else "$type/$code"
+        if (code == null) type else "$type, Code=$code"
     }.getOrDefault("Throwable")
 
     fun display(description: String, failure: Throwable): String = runCatching {
@@ -77,14 +77,21 @@ object SafeErrorText {
  */
 internal object SafeLogText {
     const val MAX_MESSAGE_CHARS = 384
+    private const val DNS_LABEL = "[\\p{L}\\p{N}\\p{M}_-]+"
+    private const val DNS_LAST_LABEL = "[\\p{L}\\p{N}\\p{M}_-]*\\p{L}[\\p{L}\\p{N}\\p{M}_-]*"
     private val sensitiveContext = listOf(
         Regex("(?i)\\b(?:authorization|proxy-authorization|bearer|basic|cookie|set-cookie|(?:client[-_]?)?secret|(?:(?:access|refresh)[-_]?)?token|password|passwd|api[-_]?key|credential|body|payload|headers?|path|file|host|server|address|endpoint|url|uri)\\b[\"']?\\s*[:= ]"),
         Regex("(?:密钥|密码|令牌|请求体|响应体|路径|地址|服务器)\\s*[:=：]"),
         Regex("(?i)\\b[a-z][a-z0-9+.-]*://"),
-        Regex("(?i)\\b[a-z0-9_-]+(?:\\.[a-z0-9_-]+)*\\.[a-z]{2,}(?=[:/\\s,，)）]|$)"),
+        // Labels define the sensitive start; no punctuation allowlist is needed after a domain.
+        // Unicode letters/marks and the IDNA dot forms also cover internationalized host names.
+        // A letter in the final label keeps numeric versions/stages such as P1.5 intact.
+        Regex("$DNS_LABEL(?:[.。．｡]$DNS_LABEL)*[.。．｡]$DNS_LAST_LABEL"),
         Regex("(?<![0-9])(?:[0-9]{1,3}\\.){3}[0-9]{1,3}"),
         Regex("(?i)(?<![a-z0-9])(?:[a-f0-9]{0,4}:){2,}[a-f0-9:.%]*"),
-        Regex("[A-Za-z]:[\\\\/]|\\\\\\\\|(?:^|[\\s(（\"'=：:])(?:\\.{1,2}[\\\\/]|/)[^\\s]*")
+        Regex("[A-Za-z]:[\\\\/]|\\\\\\\\|(?:^|[\\s(（\"'=：:])(?:\\.{1,2}[\\\\/]|/)[^\\s]*"),
+        // A relative/home path is sensitive even without a path= key or an absolute prefix.
+        Regex("[\\p{L}\\p{N}\\p{M}\\p{S}_~.-]+[\\\\/]")
     )
 
     fun message(value: String): String {

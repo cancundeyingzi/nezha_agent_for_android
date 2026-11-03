@@ -443,7 +443,7 @@ class GpuCollector internal constructor(
         // 以下策略均需要 Root/Shizuku
         if (!isRootMode) {
             if (!state.unavailableWarned) {
-                Logger.i("GpuCollector: 普通模式下 GPU 使用率不可用（需 Root/Shizuku）")
+                Logger.i("GpuCollector: 普通模式下 GPU 使用率不可用（需 Root 或 Shizuku）")
                 state.unavailableWarned = true
             }
             return GpuProbeResult(GpuCollectionStrategy.UNAVAILABLE, emptyList())
