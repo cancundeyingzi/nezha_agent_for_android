@@ -1,14 +1,16 @@
 package com.nezhahq.agent.core.config
 
-/** Current availability of the app-private, plaintext configuration store. */
+/** Availability of the encrypted configuration and any remaining migration recovery work. */
 enum class StorageStatus {
     READY,
 
     /**
-     * Plaintext storage is usable, but the one-time import from the old encrypted store could not
-     * be read. Existing plaintext fallback values remain available and no legacy data is deleted.
+     * Authoritative configuration is encrypted and usable. An unreadable old encrypted source was
+     * preserved because it may contain additional values that could not be imported.
      */
     LEGACY_UNREADABLE,
+    /** Encrypted configuration is usable; old preference files still need cleanup. */
+    CLEANUP_PENDING,
     UNAVAILABLE;
 
     val isUsable: Boolean

@@ -82,9 +82,8 @@ class MainViewModel(
     /**
      * 构造期显示的值：全部来自 [ConfigurationSnapshot.DEFAULTS]，一次存储读取都不做。
      *
-     * ViewModel 由 `by viewModels()` 在主线程构造，而此刻后台线程很可能正握着存储锁做旧加密
-     * 配置的迁移；从前这里连着 6 次同步读取，等于把整段迁移时长搬到了主线程上。真正的值由
-     * [loadConfigurationOnce] 在就绪后异步填入。
+     * 后台可能仍在初始化 Keystore 和迁移旧配置；[loadConfigurationOnce] 等待就绪后读取
+     * 已验证缓存，避免将初始化期间的默认值误认为用户配置。
      *
      * 这份默认值同时是「用户还没改过这个字段」的判据，见 [applyConfigurationSnapshot]。
      */
@@ -100,9 +99,8 @@ class MainViewModel(
     /**
      * 首次配置加载是否仍在进行。
      *
-     * 加载结束后永久为 false —— 无论存储是可用、降级还是彻底不可用，都算「结束」。界面用它
-     * 禁用输入控件与「启动服务」，ViewModel 自身也用它挡住每一个会在主线程触碰存储的入口：
-     * 那些调用会阻塞在正在做 Keystore 迁移的存储锁上。
+     * 首次初始化结束后永久为 false，无论结果是否可用。加载期间禁用编辑和启动，避免使用
+     * 临时默认值；后续恢复操作由 [isRecoveringConfigStorage] 单独管理。
      */
     var isConfigLoading by mutableStateOf(true)
         private set
@@ -122,6 +120,12 @@ class MainViewModel(
 
     var isResettingConfigStorage by mutableStateOf(false)
         private set
+
+    var isRetryingConfigStorage by mutableStateOf(false)
+        private set
+
+    val isRecoveringConfigStorage: Boolean
+        get() = isResettingConfigStorage || isRetryingConfigStorage
 
     /** 加载完成前一律为 null：还没读过存储，就没有失败可以报告。 */
     var storageErrorMessage by mutableStateOf<String?>(null)
@@ -262,7 +266,7 @@ class MainViewModel(
      * in underneath them.
      */
     val canEditConfig: Boolean
-        get() = !isConfigLoading && isConfigStorageAvailable && !isConfigWriteInProgress && !isResettingConfigStorage
+        get() = !isConfigLoading && isConfigStorageAvailable && !isConfigWriteInProgress && !isRecoveringConfigStorage
 
     // Last on purpose. viewModelScope runs on Dispatchers.Main.immediate, so this launch executes
     // inline up to its first real suspension; declared any earlier it could read state properties
@@ -287,7 +291,7 @@ class MainViewModel(
      * 2. 环境变量模式：`NZ_SERVER=host:port NZ_CLIENT_SECRET=xxx NZ_UUID=yyy NZ_TLS=true`
      */
     fun parseClipboardConfig() {
-        if (isConfigWriteInProgress || isConfigLoading || isResettingConfigStorage) return
+        if (isConfigWriteInProgress || isConfigLoading || isRecoveringConfigStorage) return
         val context = getApplication<Application>()
         val clipboard = context.getSystemService(ClipboardManager::class.java)
         val input = clipboard
@@ -562,8 +566,7 @@ class MainViewModel(
     /**
      * 检查是否需要显示首次开机自启动授权弹窗。
      *
-     * 读取放在 IO 上：这条路径由「启动探针」触发，此时存储早已就绪，但一次 SharedPreferences
-     * 提交仍会短暂持锁，没有理由让主线程去等它。
+     * 由「启动探针」在存储就绪后触发，读取已验证缓存和当前可用性。
      */
     private fun checkAndShowAutoStartPrompt() {
         if (!isConfigStorageAvailable) return
@@ -672,9 +675,39 @@ class MainViewModel(
         )
     }
 
-    /** Clears all configuration on IO; every failure also releases the loading state. */
+    /** Non-destructive retry also retries a pending migration cleanup. */
+    fun retryConfigurationStorage() {
+        if (isRecoveringConfigStorage || isConfigLoading || isConfigWriteInProgress) return
+        isRetryingConfigStorage = true
+        viewModelScope.launch {
+            try {
+                val snapshot = withContext(Dispatchers.IO) {
+                    repository.initializeStorage(retry = true)
+                    loadSnapshotOrDefaults()
+                }
+                storageStatus = snapshot.status
+                if (snapshot.status.isUsable) {
+                    applyConfigurationSnapshot(snapshot, SnapshotApplyMode.INITIAL_LOAD)
+                    storageErrorMessage = null
+                    notify("加密配置存储已恢复")
+                } else {
+                    reportStorageProblem(CONFIG_STORAGE_UNAVAILABLE_MESSAGE)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                storageStatus = StorageStatus.UNAVAILABLE
+                Logger.e("MainViewModel: 配置重试失败 (Error=${failure.javaClass.simpleName})")
+                reportStorageProblem(CONFIG_STORAGE_UNAVAILABLE_MESSAGE)
+            } finally {
+                isRetryingConfigStorage = false
+            }
+        }
+    }
+
+    /** Called after the destructive confirmation; every failure releases the loading state. */
     fun resetConfigurationStorage() {
-        if (isResettingConfigStorage || isConfigLoading || isConfigWriteInProgress) return
+        if (isRecoveringConfigStorage || isConfigLoading || isConfigWriteInProgress) return
         val ctx = getApplication<Application>()
         isResettingConfigStorage = true
         simulatorJob?.cancel()
@@ -714,7 +747,7 @@ class MainViewModel(
      * 开启时自动检测 Shizuku 可用性并按需请求权限。
      */
     fun onRootModeChanged(enabled: Boolean, shizukuRequestCode: Int) {
-        if (isConfigWriteInProgress || isConfigLoading || isResettingConfigStorage) return
+        if (isConfigWriteInProgress || isConfigLoading || isRecoveringConfigStorage) return
         if (enabled) {
             rootMode = true
             tryRequestShizukuPermission(shizukuRequestCode)
@@ -881,7 +914,7 @@ class MainViewModel(
             notify("配置正在处理，请稍候")
             return false
         }
-        if (isConfigLoading || isResettingConfigStorage) {
+        if (isConfigLoading || isRecoveringConfigStorage) {
             notify("$action 已推迟：配置仍在加载，请稍候")
             return false
         }
@@ -1139,7 +1172,7 @@ class MainViewModel(
 }
 
 private const val CONFIG_STORAGE_UNAVAILABLE_MESSAGE =
-    "配置存储不可用，连接信息不会写入；请重置配置存储"
+    "加密配置无法读取，当前不会保存或启动探针。请先重试；若系统密钥已丢失或失效，需要确认清空后重新填写配置。此前已确认但未完成的重置会在重试时继续。"
 
 private const val CONFIG_STORAGE_SLOW_MESSAGE =
     "配置存储打开较慢（可能正在迁移旧的加密配置），仍在等待，请稍候…"

@@ -24,6 +24,7 @@ androidxActivity = "1.8.2"
 # Alpha on purpose: it is the last published security-crypto line, and it is used read-only to
 # import the legacy EncryptedSharedPreferences store.
 androidxSecurityCrypto = "1.1.0-alpha06"
+androidxDataStore = "1.1.7"
 
 gson = "2.10.1"
 okhttp = "4.12.0"
@@ -41,6 +42,7 @@ androidx-lifecycle-viewmodel-compose = { module = "androidx.lifecycle:lifecycle-
 androidx-activity-ktx = { module = "androidx.activity:activity-ktx", version.ref = "androidxActivity" }
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "androidxActivity" }
 androidx-security-crypto = { module = "androidx.security:security-crypto", version.ref = "androidxSecurityCrypto" }
+androidx-datastore-core = { module = "androidx.datastore:datastore-core", version.ref = "androidxDataStore" }
 
 # Versionless by design: compose-bom pins them, exactly as the literal declarations did.
 androidx-compose-bom = { module = "androidx.compose:compose-bom", version.ref = "composeBom" }

@@ -86,6 +86,7 @@ dependencies {
 
     // Read-only migration from the legacy EncryptedSharedPreferences store.
     implementation(libs.androidx.security.crypto)
+    implementation(libs.androidx.datastore.core)
 
     // OKHTTP for Trace and Tasks
     implementation(libs.okhttp)
@@ -112,6 +113,20 @@ dependencies {
     // compose-ui-test were declared but never used, which made the project look like it had
     // instrumented coverage. Add them back alongside the first test that needs them.
     debugImplementation(libs.androidx.compose.ui.tooling)
+}
+
+// Local unit tests run on the host JVM. The Android variant sees mock SDK_INT=0 and uses
+// File.renameTo, whose replacement semantics differ on Windows. Exercise the official JVM
+// DataStore implementation here; APKs and instrumented tests keep the Android implementation.
+val dataStoreVersion = libs.versions.androidxDataStore.get()
+configurations.matching {
+    it.name.endsWith("UnitTestCompileClasspath") || it.name.endsWith("UnitTestRuntimeClasspath")
+}.configureEach {
+    resolutionStrategy.dependencySubstitution {
+        substitute(module("androidx.datastore:datastore-core"))
+            .using(module("androidx.datastore:datastore-core-jvm:$dataStoreVersion"))
+            .because("Local unit tests need the host filesystem implementation")
+    }
 }
 
 // The protobuf plugin configures codegen with plain coordinate strings rather than dependency

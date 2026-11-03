@@ -11,77 +11,62 @@ import com.nezhahq.agent.core.model.KeepAliveSettings
 import com.nezhahq.agent.core.model.RemoteCapabilities
 import com.nezhahq.agent.core.model.RemoteCapability
 import com.nezhahq.agent.core.model.SimulatorDraft
+import com.nezhahq.agent.core.model.SimulatedDeviceConfig
 import com.nezhahq.agent.core.platform.VpnTrafficCompatibility
 import java.io.IOException
 
-/**
- * [ConfigRepository] backed by [ConfigStore].
- *
- * Every read opens the store first, so a store that failed to initialize reports its defaults
- * rather than throwing at each call site.
- */
-class SharedPreferencesConfigRepository(context: Context) : ConfigRepository {
+/** Synchronous reads are memory-only; initialization and writes are explicit IO operations. */
+class DataStoreConfigRepository(context: Context) : ConfigRepository {
     private val context = context.applicationContext
 
-    override fun storageStatus(): StorageStatus = ConfigStore.initialize(context)
-
+    override fun initializeStorage(retry: Boolean): StorageStatus = ConfigStore.initialize(context, retry)
+    override fun storageStatus(): StorageStatus = ConfigStore.status(context)
     override fun resetStorage(): Boolean = ConfigStore.resetConfigurationStorage(context)
 
     override fun loadAgentConfig(): Result<AgentConfig> = runCatching {
-        check(storageStatus().isUsable) { "Configuration storage is unavailable." }
-        val draft = loadConnectionDraft()
+        val current = ConfigStore.snapshot(context)
+        check(current.status.isUsable) { "Configuration storage is unavailable." }
+        val values = checkNotNull(current.document).values
+        val draft = connection(values)
         AgentConfig(
-            server = draft.server,
-            port = draft.port,
-            secret = draft.secret,
-            uuid = draft.uuid,
-            useTls = draft.useTls,
-            rootMode = draft.rootMode,
-            keepAlive = loadToolSettings(),
-            remoteCapabilities = loadRemoteCapabilities()
+            server = draft.server, port = draft.port, secret = draft.secret, uuid = draft.uuid,
+            useTls = draft.useTls, rootMode = draft.rootMode,
+            keepAlive = tools(values), remoteCapabilities = capabilities(values)
         )
     }
 
-    override fun hasCompleteConnection(): Boolean = ConfigStore.hasValidConfig(context)
-
-    override fun loadConnectionDraft(): ConnectionDraft = ConnectionDraft(
-        server = ConfigStore.getServer(context),
-        port = ConfigStore.getPort(context),
-        secret = ConfigStore.getSecret(context),
-        uuid = ConfigStore.getUuid(context),
-        useTls = ConfigStore.getUseTls(context),
-        rootMode = ConfigStore.getRootMode(context)
-    )
-
-    /** The VPN fallback is normalized on read so an unsupported device never reports it enabled. */
-    override fun loadToolSettings(): KeepAliveSettings = KeepAliveSettings(
-        audio = ConfigStore.getEnableKeepAliveAudio(context),
-        overlay = ConfigStore.getEnableFloatWindow(context),
-        vpn = VpnTrafficCompatibility.normalize(
-            enabled = ConfigStore.getEnableVpnTraffic(context),
-            sdkInt = Build.VERSION.SDK_INT
+    override fun hasCompleteConnection(): Boolean = ConfigurationStorageCoordinator.hasCompleteConnection(values())
+    override fun loadConnectionDraft(): ConnectionDraft = connection(values())
+    override fun loadToolSettings(): KeepAliveSettings = tools(values())
+    override fun loadRemoteCapabilities(): RemoteCapabilities = capabilities(values())
+    override fun loadAutoStartState(): AutoStartState = values().let {
+        AutoStartState(it.boolean("enable_auto_start"), it.boolean("has_shown_auto_start_prompt"))
+    }
+    override fun loadSimulatorDraft(): SimulatorDraft = values().let {
+        SimulatorDraft(
+            server = it.string("simulator_server", it.string("server")),
+            port = it.int("simulator_port", it.int("port", 5555)),
+            secret = it.string("simulator_secret", it.string("secret")),
+            useTls = it.boolean("simulator_use_tls", it.boolean("use_tls", true)),
+            threadCount = it.int("simulator_thread_count", SimulatedDeviceConfig.DEFAULT_THREAD_COUNT)
+                .coerceIn(1, SimulatedDeviceConfig.MAX_THREAD_COUNT)
         )
-    )
+    }
 
-    override fun loadRemoteCapabilities(): RemoteCapabilities = RemoteCapabilities(
-        shellEnabled = ConfigStore.getEnableRemoteCommand(context),
-        fileManagerEnabled = ConfigStore.getEnableRemoteFileManager(context),
-        natEnabled = ConfigStore.getEnableRemoteNat(context)
+    private fun values(): ConfigurationValues = ConfigStore.snapshot(context).document?.values ?: ConfigurationValues.EMPTY
+    private fun connection(values: ConfigurationValues): ConnectionDraft = ConnectionDraft(
+        server = values.string("server"), port = values.int("port", 5555), secret = values.string("secret"),
+        uuid = values.string("uuid"), useTls = values.boolean("use_tls", true), rootMode = values.boolean("root_mode")
     )
-
-    override fun loadAutoStartState(): AutoStartState = AutoStartState(
-        enabled = ConfigStore.getEnableAutoStart(context),
-        promptShown = ConfigStore.getHasShownAutoStartPrompt(context)
+    private fun tools(values: ConfigurationValues): KeepAliveSettings = KeepAliveSettings(
+        audio = values.boolean("enable_keep_alive_audio"), overlay = values.boolean("enable_float_window"),
+        vpn = VpnTrafficCompatibility.normalize(values.boolean("enable_vpn_traffic"), Build.VERSION.SDK_INT)
     )
-
-    override fun loadSimulatorDraft(): SimulatorDraft = SimulatorDraft(
-        server = ConfigStore.getSimulatorServer(context),
-        port = ConfigStore.getSimulatorPort(context),
-        secret = ConfigStore.getSimulatorSecret(context),
-        useTls = ConfigStore.getSimulatorUseTls(context),
-        threadCount = ConfigStore.getSimulatorThreadCount(context)
+    private fun capabilities(values: ConfigurationValues): RemoteCapabilities = RemoteCapabilities(
+        shellEnabled = values.boolean("enable_remote_command"),
+        fileManagerEnabled = values.boolean("enable_remote_file_manager"),
+        natEnabled = values.boolean("enable_remote_nat")
     )
-
     override fun saveConnection(draft: ConnectionDraft): Result<Unit> = runCatching {
         requirePersisted(
             ConfigStore.saveConfig(

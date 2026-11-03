@@ -21,6 +21,8 @@ class ConfigurationLoadingTest {
     @get:Rule
     val silentLogger = SilentLoggerRule()
 
+    @get:Rule val temporaryFolder = org.junit.rules.TemporaryFolder()
+
     @Test
     fun theFirstReadWaitsForReadinessAndRunsOffTheCallingThread() = runBlocking {
         val readiness = ConfigurationReadiness()
@@ -57,35 +59,24 @@ class ConfigurationLoadingTest {
 
     @Test
     fun aNewWaiterReadsRecoveredStorageAfterTheFirstInitializationFailed() = runBlocking {
-        val coordinator = ConfigurationStorageCoordinator(object : ConfigurationStorageOperations<Unit> {
-            override fun openPlainStorage(): Unit = throw IOException("initial open failed")
-            override fun isMigrationComplete(storage: Unit): Boolean = true
-            override fun importLegacyEncryptedStorage(storage: Unit): LegacyImportResult = LegacyImportResult.COMPLETED
-            override fun resetPlainStorage() = Unit
-            override fun isResetStorage(storage: Unit): Boolean = true
-        })
-        val readiness = ConfigurationReadiness().apply { complete(coordinator.initialize()) }
-        val reads = AtomicInteger()
-        val readCurrentSnapshot = {
-            reads.incrementAndGet()
-            val currentStatus = coordinator.initialize()
-            coordinator.read(ConfigurationSnapshot.DEFAULTS) {
-                ConfigurationSnapshot.DEFAULTS.copy(status = currentStatus)
+        ConfigurationStorageFixture(temporaryFolder.newFolder(), ConfigurationStorageFixture.CONNECTION).use { fixture ->
+            fixture.keys.inaccessible = true
+            val coordinator = fixture.coordinator
+            val readiness = ConfigurationReadiness().apply { complete(coordinator.initialize()) }
+            val reads = AtomicInteger()
+            val readCurrentSnapshot = {
+                reads.incrementAndGet()
+                ConfigurationSnapshot.DEFAULTS.copy(status = coordinator.currentStatus())
             }
+            assertFalse(awaitInitialConfiguration(readiness, readCurrentSnapshot).status.isUsable)
+            fixture.keys.inaccessible = false
+            assertEquals(StorageStatus.READY, coordinator.initialize(retry = true))
+            // A recreated ViewModel observes the recovered cache, not the obsolete signal result.
+            assertEquals(StorageStatus.UNAVAILABLE, readiness.await())
+            assertEquals(StorageStatus.READY, awaitInitialConfiguration(readiness, readCurrentSnapshot).status)
+            assertEquals(2, reads.get())
         }
-
-        val first = awaitInitialConfiguration(readiness, readCurrentSnapshot)
-        assertFalse(first.status.isUsable)
-        assertTrue(coordinator.reset())
-
-        // A recreated ViewModel reuses the process-wide signal, whose original result stays failed.
-        assertEquals(StorageStatus.UNAVAILABLE, readiness.await())
-        val recreated = awaitInitialConfiguration(readiness, readCurrentSnapshot)
-
-        assertEquals(StorageStatus.READY, recreated.status)
-        assertEquals(2, reads.get())
     }
-
     @Test
     fun aReadFailureCompletesWithUnavailableDefaultsAndNoSensitiveLog() = runBlocking {
         val readiness = ConfigurationReadiness().apply { complete(StorageStatus.READY) }

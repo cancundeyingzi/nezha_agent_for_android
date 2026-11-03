@@ -26,12 +26,10 @@ import kotlin.concurrent.thread
 class BootReceiver : BroadcastReceiver() {
 
     /**
-     * Decides off the main thread, because reading the configuration can be slow.
+     * Initializes storage and decides off the main thread.
      *
-     * The first read opens the store, which on an upgraded install migrates the legacy encrypted
-     * preferences and builds an Android Keystore master key. `onReceive` runs on the main thread
-     * with roughly ten seconds before the receiver is killed, and boot is exactly when the device
-     * is slowest, so doing that work inline risked losing the auto-start it was meant to perform.
+     * Explicit initialization waits for the encrypted configuration before consulting cached
+     * auto-start values. Keystore and legacy migration must not consume onReceive's main thread.
      */
     override fun onReceive(context: Context, intent: Intent) {
         val action = intent.action ?: return
@@ -56,7 +54,7 @@ class BootReceiver : BroadcastReceiver() {
 
     private fun startAgentIfConfigured(context: Context) {
         val repository = context.appContainer.configRepository
-        if (!repository.storageStatus().isUsable) {
+        if (!repository.initializeStorage().isUsable) {
             Logger.e("BootReceiver: 收到系统启动广播，但配置存储不可用，拒绝自动启动。")
             return
         }

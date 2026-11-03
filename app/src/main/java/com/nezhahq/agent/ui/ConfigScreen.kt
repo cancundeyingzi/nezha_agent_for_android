@@ -51,7 +51,8 @@ fun ConfigScreenContent(
     // 加载期间禁止编辑连接字段与“启动探针”：否则用户可能在字段被填充前就点启动，拿到一份空配置。
     val configLoading = vm.isConfigLoading
     // 连接字段的可用性：既要没有写入进行中，也要首次加载已完成。
-    val fieldsEnabled = !vm.isConfigWriteInProgress && !configLoading && !vm.isResettingConfigStorage
+    val fieldsEnabled = !vm.isConfigWriteInProgress && !configLoading && !vm.isRecoveringConfigStorage
+    var showResetConfirmation by remember { mutableStateOf(false) }
 
     // ── 通知权限 Launcher（异步时序安全） ──
     var pendingServiceLaunch by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -133,15 +134,23 @@ fun ConfigScreenContent(
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
                     vm.storageErrorMessage
-                        ?: "配置存储不可用，连接信息不会写入；请重置配置存储",
+                        ?: "加密配置无法读取。请先重试；只有确认重置才会清空配置，未完成的重置会继续执行。",
                     style = MaterialTheme.typography.bodyMedium,
                     color = LgError
                 )
                 Spacer(modifier = Modifier.height(12.dp))
                 GlassButtonPrimary(
-                    onClick = { vm.resetConfigurationStorage() },
+                    onClick = { vm.retryConfigurationStorage() },
                     modifier = Modifier.fillMaxWidth(),
-                    enabled = !vm.isResettingConfigStorage
+                    enabled = !vm.isRecoveringConfigStorage
+                ) {
+                    Text(if (vm.isRetryingConfigStorage) "正在重试…" else "重试读取", fontWeight = FontWeight.Bold)
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                GlassButtonSecondary(
+                    onClick = { showResetConfirmation = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !vm.isRecoveringConfigStorage
                 ) {
                     if (vm.isResettingConfigStorage) {
                         CircularProgressIndicator(
@@ -156,7 +165,7 @@ fun ConfigScreenContent(
                     }
                 }
             }
-        } else if (vm.storageStatus == StorageStatus.LEGACY_UNREADABLE) {
+        } else if (vm.storageStatus == StorageStatus.LEGACY_UNREADABLE || vm.storageStatus == StorageStatus.CLEANUP_PENDING) {
             EtherCard(
                 modifier = Modifier.border(
                     width = 1.dp,
@@ -165,11 +174,36 @@ fun ConfigScreenContent(
                 )
             ) {
                 Text(
-                    "旧加密配置无法读取，已改用明文兼容存储。请核对并保存连接配置；此后重启不再依赖系统密钥库。",
+                    if (vm.storageStatus == StorageStatus.CLEANUP_PENDING)
+                        "配置已加密保存，但旧明文配置尚未清理完成。请重试清理。"
+                    else "当前配置已加密保存。另有旧加密配置无法读取，已保留原文件；请核对连接和模拟器设置。",
                     style = MaterialTheme.typography.bodyMedium,
                     color = LgWarning
                 )
+                if (vm.storageStatus == StorageStatus.CLEANUP_PENDING) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    GlassButtonSecondary(onClick = { vm.retryConfigurationStorage() }, enabled = !vm.isRecoveringConfigStorage) {
+                        Text(if (vm.isRetryingConfigStorage) "正在重试…" else "重试清理")
+                    }
+                }
             }
+        }
+
+        if (showResetConfirmation) {
+            AlertDialog(
+                onDismissRequest = { showResetConfirmation = false },
+                title = { Text("清空所有配置并重建加密存储？") },
+                text = { Text("此操作将删除连接密钥、模拟器配置、工具设置及旧配置文件，停止探针并关闭 Root/Shizuku 模式。清空后无法恢复，需要重新填写连接信息。系统密钥暂时不可用时，请先取消并使用“重试读取”。") },
+                confirmButton = {
+                    GlassButtonPrimary(onClick = {
+                        showResetConfirmation = false
+                        vm.resetConfigurationStorage()
+                    }) { Text("确认清空") }
+                },
+                dismissButton = {
+                    GlassButtonSecondary(onClick = { showResetConfirmation = false }) { Text("取消") }
+                }
+            )
         }
 
         // ── 首次启动自启动授权弹窗（保持功能不变）──

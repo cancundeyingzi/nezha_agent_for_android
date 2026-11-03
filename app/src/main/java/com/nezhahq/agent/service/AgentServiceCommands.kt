@@ -174,6 +174,7 @@ internal class AgentConfigCommandProcessor(
     }
 
     private suspend fun loadConfig(): ConfigLoadOutcome = withContext(ioDispatcher) {
+        repository.initializeStorage()
         repository.loadAgentConfig().fold(
             onSuccess = { ConfigLoadOutcome.Ready(it) },
             onFailure = { ConfigLoadOutcome.Failed(it) }

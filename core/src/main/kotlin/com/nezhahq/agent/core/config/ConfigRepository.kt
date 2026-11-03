@@ -16,6 +16,9 @@ import com.nezhahq.agent.core.model.SimulatorDraft
  * while the `load*Draft` calls yield raw values the UI can render even when nothing is filled in.
  */
 interface ConfigRepository {
+    /** Explicit blocking IO boundary; ordinary reads only access an already verified snapshot. */
+    fun initializeStorage(retry: Boolean = false): StorageStatus = storageStatus()
+
     fun storageStatus(): StorageStatus
 
     /** Clears every stored value and recreates a verified-empty store. */

@@ -68,14 +68,18 @@ fun ToolsScreenContent(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                permissionError = "权限状态读取失败，请重新进入此页面重试"
+                permissionError = if (!vm.storageStatus.isUsable) {
+                    "配置存储不可用，请前往配置页重试读取"
+                } else {
+                    "权限状态读取失败，请重新进入此页面重试"
+                }
             } finally {
                 permissionsLoading = false
             }
         }
     }
-    // 首次进入时异步加载一次。key = Unit：只在进入组合时触发，不因重组反复重启。
-    LaunchedEffect(Unit) { refreshPermissions() }
+    // Retry/reset may recover storage while this page remains composed.
+    LaunchedEffect(vm.storageStatus, vm.isConfigLoading) { refreshPermissions() }
 
     // ── 生命周期感知：从系统设置页返回时自动刷新权限状态 ──
     // 说明：此处仍用 androidx.compose.ui.platform.LocalLifecycleOwner。理应迁到

@@ -4,11 +4,10 @@ import android.content.Context
 import com.nezhahq.agent.core.config.ConfigRepository
 import com.nezhahq.agent.core.config.StorageStatus
 import com.nezhahq.agent.grpc.ConnectionStateHolder
-import com.nezhahq.agent.util.ConfigStore
 import com.nezhahq.agent.util.ConfigurationReadiness
 import com.nezhahq.agent.util.Logger
 import com.nezhahq.agent.util.LocalDiagnostics
-import com.nezhahq.agent.util.SharedPreferencesConfigRepository
+import com.nezhahq.agent.util.DataStoreConfigRepository
 import java.io.File
 
 /**
@@ -27,44 +26,19 @@ class AppContainer(context: Context) {
         Logger.diagnostics = localDiagnostics
     }
 
-    val configRepository: ConfigRepository = SharedPreferencesConfigRepository(appContext)
+    val configRepository: ConfigRepository = DataStoreConfigRepository(appContext)
 
-    /**
-     * Resolves once [initializeConfigurationStorage] has run.
-     *
-     * Anything on the main thread waits for this rather than calling the repository directly: the
-     * first read is what opens the store, and it blocks behind the background initialization for as
-     * long as the legacy-store migration takes. Background callers such as [BootReceiver] already
-     * have a thread to block on and need no signal.
-     */
+    /** First-load UI barrier; later recovery publishes a fresh cached repository snapshot. */
     internal val configurationReadiness = ConfigurationReadiness()
 
     /** Written by the running service, observed by the UI. */
     val connectionState = ConnectionStateHolder()
 
-    /**
-     * Opens configuration storage, applies the persisted root-mode grant, and releases waiters.
-     *
-     * Must be called off the main thread — see the call site in [NezhaAgentApplication].
-     *
-     * Root mode is routed through the storage layer so it takes the same ordering boundary as a
-     * root-mode write; otherwise a startup read could race a concurrent toggle and re-enable stale
-     * state. It is applied on a best-effort basis and deliberately cannot veto readiness: a grant
-     * that fails to apply leaves the process unprivileged, which is a safe outcome, whereas a
-     * configuration store that never reports ready is a UI that never becomes usable.
-     *
-     * Nothing here may propagate a failure for the same reason. A store that could not be opened
-     * publishes UNAVAILABLE, a state every consumer already knows how to render.
-     */
+    /** Initializes encrypted storage and Root authorization off the main thread, then releases UI waiters. */
     fun initializeConfigurationStorage() {
         var status = StorageStatus.UNAVAILABLE
         try {
-            status = configRepository.storageStatus()
-            try {
-                ConfigStore.synchronizeRootAuthorization(appContext, status)
-            } catch (failure: Throwable) {
-                Logger.e("AppContainer: 应用已保存的高权限授权失败 (Error=${failure.javaClass.simpleName})")
-            }
+            status = configRepository.initializeStorage()
         } catch (failure: Throwable) {
             Logger.e("AppContainer: 配置存储初始化失败 (Error=${failure.javaClass.simpleName})")
         } finally {

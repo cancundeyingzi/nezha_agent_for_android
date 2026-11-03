@@ -8,12 +8,10 @@ import com.nezhahq.agent.core.model.SimulatedDeviceConfig
 import com.nezhahq.agent.core.model.SimulatorDraft
 
 /**
- * Every stored value the editing screens render, read as one unit.
+ * Configuration fields and availability rendered by the editing screens.
  *
- * Drawing the form takes five unrelated `load*` calls. Bundling them lets a caller do the whole read
- * on a background thread and hand the main thread a single value, instead of five main-thread calls
- * that each take the storage lock — which, while the store is still opening, means each one blocks
- * for the full length of the legacy-store migration.
+ * Initial loading waits for the storage readiness signal, then combines the repository's cached
+ * values for a single UI update. This type itself never opens storage or touches the Keystore.
  */
 data class ConfigurationSnapshot(
     val connection: ConnectionDraft,
@@ -64,8 +62,8 @@ data class ConfigurationSnapshot(
 /**
  * Reads every value the editing screens show, and only then the resulting storage status.
  *
- * The ordering matters: a read that fails is what marks the store unavailable, so sampling the
- * status first would report READY for a snapshot that is in fact all defaults.
+ * Status is sampled last so a repository that becomes unavailable while reading cannot expose
+ * fallback values alongside an earlier READY status.
  */
 fun ConfigRepository.loadConfigurationSnapshot(): ConfigurationSnapshot {
     val connection = loadConnectionDraft()
