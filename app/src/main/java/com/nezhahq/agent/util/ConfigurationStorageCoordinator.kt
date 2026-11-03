@@ -71,6 +71,9 @@ internal class ConfigurationStorageCoordinator(
 ) {
     private val lock = Any()
     private var attempted = false
+    // Keep this fact even after a failed write/read clears the published snapshot. A missing file
+    // must not look like first install merely because it disappeared within the same process.
+    private var knownTarget = false
     @Volatile private var published = PublishedConfiguration()
 
     fun current(): PublishedConfiguration = published
@@ -89,10 +92,15 @@ internal class ConfigurationStorageCoordinator(
                             completeReset()
                         } else {
                             val document = if (persistence.exists()) {
+                                knownTarget = true
                                 persistence.read().also { check(it == persistence.verify()) }
                             } else {
+                                check(!knownTarget && !persistence.hasEstablishedStorage()) {
+                                    "Established encrypted configuration is missing"
+                                }
                                 migrate()
                             }
+                            establishAuthority()
                             activate(finishCleanup(document))
                         }
                     } catch (failure: Exception) {
@@ -116,6 +124,7 @@ internal class ConfigurationStorageCoordinator(
                         // DataStore may still cache the last good value after the underlying file
                         // is damaged or replaced. Preserve that file instead of writing over it.
                         check(persistence.verify() == current) { "Stored configuration changed or is unreadable" }
+                        establishAuthority()
                         val candidate = current.copy(values = changes(current.values))
                         persistVerified(candidate)
                         activate(finishCleanup(candidate))
@@ -192,10 +201,18 @@ internal class ConfigurationStorageCoordinator(
         return completed
     }
 
+    private fun establishAuthority() {
+        knownTarget = true
+        // This barrier precedes both source deletion and publishing READY. If it fails, the
+        // verified ciphertext and untouched sources can be retried without losing either.
+        persistence.recordEstablishedStorage()
+    }
+
     private fun completeReset() {
         persistence.recreateForReset()
         val empty = StoredConfiguration(initialized = true, cleanup = ConfigurationCleanup.ALL_LEGACY)
         persistVerified(empty)
+        establishAuthority()
         val completed = finishCleanup(empty)
         check(completed.cleanup == ConfigurationCleanup.NONE) { "Legacy cleanup is incomplete" }
         check(persistence.verify() == completed && completed.values.entries.isEmpty())

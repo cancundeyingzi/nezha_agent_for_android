@@ -48,8 +48,8 @@ internal class AndroidConfigurationKeyProvider(
 
 /**
  * Neither migration source receives new values. Names/alias can be isolated for device tests;
- * production keeps the historical names. The SharedPreferences cache is opened only when needed
- * for old encrypted decoding or for cleanup after target verification.
+ * production keeps the historical names. Android's disk-backed SharedPreferences cache is opened
+ * only for cleanup after target verification; decoding uses a strict read-only snapshot.
  */
 internal class AndroidLegacyConfigurationOperations(
     private val context: Context,
@@ -57,13 +57,8 @@ internal class AndroidLegacyConfigurationOperations(
     private val encryptedPrefsName: String = ENCRYPTED_PREFS,
     private val legacyMasterKeyAlias: String = MasterKey.DEFAULT_MASTER_KEY_ALIAS
 ) : LegacyConfigurationOperations {
-    override fun readPlaintext(): LegacyPlaintextConfiguration {
-        val values = files(plainPrefsName).readValues().entries
-        return LegacyPlaintextConfiguration(
-            ConfigurationValues.from(values.filterKeys { it != MIGRATION_MARKER }),
-            values[MIGRATION_MARKER] == true
-        )
-    }
+    override fun readPlaintext(): LegacyPlaintextConfiguration =
+        readLegacyPlaintextConfiguration(files(plainPrefsName))
 
     override fun encryptedExists(): Boolean = files(encryptedPrefsName).exists()
 
@@ -73,13 +68,14 @@ internal class AndroidLegacyConfigurationOperations(
         // The alias overload avoids constructing a new MasterKey during a read-only migration.
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         check(store.containsAlias(legacyMasterKeyAlias)) { "Legacy key is missing" }
-        val source = context.getSharedPreferences(encryptedPrefsName, Context.MODE_PRIVATE)
+        val source = ReadOnlyLegacyPreferences(files(encryptedPrefsName).readValues())
         check(source.contains("__androidx_security_crypto_encrypted_prefs_key_keyset__") &&
             source.contains("__androidx_security_crypto_encrypted_prefs_value_keyset__")) {
             "Legacy keysets are missing"
         }
         val encrypted = EncryptedSharedPreferences.create(
-            encryptedPrefsName, legacyMasterKeyAlias, context,
+            encryptedPrefsName, legacyMasterKeyAlias,
+            ReadOnlyLegacyPreferencesContext(context, encryptedPrefsName, source),
             EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
         )
@@ -110,4 +106,18 @@ internal class AndroidLegacyConfigurationOperations(
         const val ENCRYPTED_PREFS = "nezha_secure_prefs"
         const val MIGRATION_MARKER = "__plaintext_config_v1"
     }
+}
+
+/** Preserve SharedPreferences.getBoolean's type failure at the production migration boundary. */
+internal fun readLegacyPlaintextConfiguration(files: SharedPreferencesFiles): LegacyPlaintextConfiguration {
+    val values = files.readValues().entries
+    val markerName = AndroidLegacyConfigurationOperations.MIGRATION_MARKER
+    val marker = values[markerName]
+    if (values.containsKey(markerName) && marker !is Boolean) {
+        throw IOException("Invalid legacy configuration migration marker")
+    }
+    return LegacyPlaintextConfiguration(
+        ConfigurationValues.from(values.filterKeys { it != markerName }),
+        marker as? Boolean ?: false
+    )
 }

@@ -21,6 +21,8 @@ internal interface ConfigurationPersistence {
     fun verify(): StoredConfiguration
     fun prepareNewKey()
     fun close()
+    fun hasEstablishedStorage(): Boolean
+    fun recordEstablishedStorage()
     fun resetPending(): Boolean
     fun recordResetIntent()
     fun recreateForReset()
@@ -57,8 +59,17 @@ internal class EncryptedConfigurationDataStore(
 
     override fun resetPending(): Boolean = resetFile().exists()
 
+    override fun hasEstablishedStorage(): Boolean =
+        establishedFile().exists() || File(establishedFile().path + ".tmp").exists()
+
+    override fun recordEstablishedStorage() = recordMarker(establishedFile())
+
     override fun recordResetIntent() {
-        val marker = resetFile()
+        recordMarker(resetFile())
+    }
+
+    /** Markers contain only a version byte. Callers establish authority after ciphertext verifies. */
+    private fun recordMarker(marker: File) {
         if (marker.exists()) return
         check(marker.parentFile!!.isDirectory || marker.parentFile!!.mkdirs())
         val temporary = File(marker.path + ".tmp")
@@ -66,7 +77,10 @@ internal class EncryptedConfigurationDataStore(
             stream.write(byteArrayOf(1))
             stream.fd.sync()
         }
-        check(temporary.renameTo(marker)) { "Unable to record reset intent" }
+        check(temporary.renameTo(marker)) { "Unable to persist configuration lifecycle marker" }
+        check(marker.inputStream().use { it.read() == 1 && it.read() == -1 }) {
+            "Unable to verify configuration lifecycle marker"
+        }
     }
 
     override fun recreateForReset() {
@@ -84,6 +98,7 @@ internal class EncryptedConfigurationDataStore(
     }
 
     private fun resetFile(): File = File(file().path + ".reset")
+    private fun establishedFile(): File = File(file().path + ".established")
 
     private fun dataStore(): DataStore<StoredConfiguration> {
         store?.let { return it }

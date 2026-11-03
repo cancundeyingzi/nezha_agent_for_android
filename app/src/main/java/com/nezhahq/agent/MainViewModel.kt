@@ -24,7 +24,6 @@ import com.nezhahq.agent.core.config.ConfigRepository
 import com.nezhahq.agent.core.config.ConfigurationSnapshot
 import com.nezhahq.agent.core.config.StorageStatus
 import com.nezhahq.agent.core.config.loadConfigurationSnapshot
-import com.nezhahq.agent.core.config.resolveEditedValue
 import com.nezhahq.agent.core.model.AgentConfig
 import com.nezhahq.agent.core.model.ConnectionDraft
 import com.nezhahq.agent.core.model.KeepAliveSettings
@@ -45,6 +44,8 @@ import com.nezhahq.agent.util.SafeErrorText
 import com.nezhahq.agent.util.RootShell
 import com.nezhahq.agent.util.awaitInitialConfiguration
 import com.nezhahq.agent.util.ConfigurationOperationGate
+import com.nezhahq.agent.util.ConfigurationRecoveryState
+import com.nezhahq.agent.util.SnapshotApplyMode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -90,6 +91,7 @@ class MainViewModel(
     private val defaults = ConfigurationSnapshot.DEFAULTS
 
     private val configurationReadiness = application.appContainer.configurationReadiness
+    private val configurationRecovery = ConfigurationRecoveryState()
 
     private val localDiagnostics = application.appContainer.localDiagnostics
     val diagnosticState = localDiagnostics.state
@@ -675,19 +677,19 @@ class MainViewModel(
         )
     }
 
-    /** Non-destructive retry also retries a pending migration cleanup. */
+    /** Retries initialization, or continues this ViewModel's already-confirmed reset. */
     fun retryConfigurationStorage() {
         if (isRecoveringConfigStorage || isConfigLoading || isConfigWriteInProgress) return
         isRetryingConfigStorage = true
         viewModelScope.launch {
             try {
                 val snapshot = withContext(Dispatchers.IO) {
-                    repository.initializeStorage(retry = true)
-                    loadSnapshotOrDefaults()
+                    if (configurationRecovery.retryStorage(repository).isUsable) loadSnapshotOrDefaults()
+                    else ConfigurationSnapshot.DEFAULTS
                 }
                 storageStatus = snapshot.status
                 if (snapshot.status.isUsable) {
-                    applyConfigurationSnapshot(snapshot, SnapshotApplyMode.INITIAL_LOAD)
+                    applyConfigurationSnapshot(snapshot, configurationRecovery.applyMode)
                     storageErrorMessage = null
                     notify("加密配置存储已恢复")
                 } else {
@@ -709,6 +711,7 @@ class MainViewModel(
     fun resetConfigurationStorage() {
         if (isRecoveringConfigStorage || isConfigLoading || isConfigWriteInProgress) return
         val ctx = getApplication<Application>()
+        configurationRecovery.confirmReset()
         isResettingConfigStorage = true
         simulatorJob?.cancel()
         simulatorJob = null
@@ -1057,21 +1060,6 @@ class MainViewModel(
         ConfigurationSnapshot.DEFAULTS
     }
 
-    private enum class SnapshotApplyMode {
-        /**
-         * 首次加载：只填用户还没碰过的字段。
-         *
-         * 判据是「当前值仍等于 [ConfigurationSnapshot.DEFAULTS] 里的对应值」——界面本来就是
-         * 用这份默认值渲染的，任何偏离都只可能来自用户输入。它看不出「改了又改回默认值」这
-         * 一种情况，所以只是第二道防线：加载期 [canEditConfig] 为 false，输入控件本身就是
-         * 禁用的。会话状态（模拟器计数、首启弹窗）与存储无关，此模式下原样保留。
-         */
-        INITIAL_LOAD,
-
-        /** 重置之后重新载入：存储是唯一事实，连会话状态也一并归零。 */
-        RELOAD_AFTER_RESET
-    }
-
     /**
      * 把一份存储快照铺到界面字段上。
      *
@@ -1083,11 +1071,7 @@ class MainViewModel(
         mode: SnapshotApplyMode
     ) {
         fun <T> pick(current: T, loaded: T, untouched: T): T =
-            if (mode == SnapshotApplyMode.INITIAL_LOAD) {
-                resolveEditedValue(current = current, loaded = loaded, untouched = untouched)
-            } else {
-                loaded
-            }
+            mode.resolve(current, loaded, untouched)
 
         val connection = snapshot.connection
         val defaultConnection = defaults.connection
@@ -1150,6 +1134,7 @@ class MainViewModel(
             simulatorLastStatus = SIMULATOR_IDLE_STATUS
             showAutoStartPrompt = false
         }
+        configurationRecovery.snapshotApplied(mode)
     }
 
     override fun onCleared() {

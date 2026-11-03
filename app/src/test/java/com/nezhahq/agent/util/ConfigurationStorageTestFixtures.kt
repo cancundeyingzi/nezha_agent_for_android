@@ -90,7 +90,10 @@ internal class FaultInjectingConfigurationPersistence(
     var beforeWrite: () -> Unit = {}
     var afterWrite: () -> Unit = {}
     var beforeVerify: () -> Unit = {}
+    var beforeEstablish: () -> Unit = {}
+    var afterEstablish: () -> Unit = {}
     var beforeRecreate: () -> Unit = {}
+    var beforeRecordReset: () -> Unit = {}
     var beforeFinishReset: () -> Unit = {}
     override fun write(value: StoredConfiguration) {
         beforeWrite()
@@ -107,6 +110,17 @@ internal class FaultInjectingConfigurationPersistence(
     override fun recreateForReset() {
         beforeRecreate()
         delegate.recreateForReset()
+    }
+    override fun recordResetIntent() {
+        beforeRecordReset()
+        delegate.recordResetIntent()
+    }
+    override fun recordEstablishedStorage() {
+        beforeEstablish()
+        events += "establish"
+        delegate.recordEstablishedStorage()
+        events += "established"
+        afterEstablish()
     }
     override fun finishReset() {
         beforeFinishReset()

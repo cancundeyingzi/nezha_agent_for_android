@@ -24,6 +24,7 @@ class ConfigurationStorageCoordinatorTest {
         assertTrue(f.backend.verify().values.entries.isEmpty())
         assertFalse(f.rootAuthorized)
         assertEquals(1, f.keys.creates)
+        assertArrayEquals(byteArrayOf(1), File(f.file.path + ".established").readBytes())
         f.reopen()
         assertEquals(StorageStatus.READY, f.coordinator.initialize())
         assertEquals(1, f.keys.creates)
@@ -34,6 +35,8 @@ class ConfigurationStorageCoordinatorTest {
             f.legacy.beforeDelete = {
                 assertEquals(CONNECTION, f.backend.verify().values.entries)
                 assertTrue(f.events.indexOf("verified") < f.events.indexOf("deletePlaintext"))
+                assertTrue(f.backend.hasEstablishedStorage())
+                assertTrue(f.events.indexOf("established") < f.events.indexOf("deletePlaintext"))
             }
             assertEquals(StorageStatus.READY, f.coordinator.initialize())
             assertEquals(CONNECTION, f.coordinator.current().document!!.values.entries)
@@ -98,6 +101,7 @@ class ConfigurationStorageCoordinatorTest {
         f.persistence.beforeWrite = { throw IOException("write interrupted") }
         assertEquals(StorageStatus.UNAVAILABLE, f.coordinator.initialize())
         assertTrue(f.legacy.xml.exists())
+        assertFalse(f.backend.hasEstablishedStorage())
         assertFalse(f.events.contains("deletePlaintext"))
         f.persistence.beforeWrite = {}
         assertEquals(StorageStatus.READY, f.coordinator.initialize(retry = true))
@@ -184,6 +188,121 @@ class ConfigurationStorageCoordinatorTest {
             assertEquals(0, f.keys.replacements)
             assertFalse(f.rootAuthorized)
         }
+    }
+
+    @Test fun deletingEstablishedTargetCannotReimportLegacyInTheSameProcess() = fixture(encrypted = CONNECTION).use { f ->
+        assertEquals(StorageStatus.READY, f.coordinator.initialize())
+        assertTrue(f.backend.hasEstablishedStorage())
+        val originalKey = f.keys.key
+        val legacyBytes = f.legacy.encryptedFile.readBytes()
+        assertTrue(f.file.delete())
+        assertFalse(f.coordinator.write { it.changed(mapOf("secret" to "new-secret")) })
+        assertEquals(StorageStatus.UNAVAILABLE, f.coordinator.initialize(retry = true))
+        assertFalse(f.file.exists())
+        assertEquals(1, f.legacy.encryptedReads)
+        assertEquals(1, f.legacy.plainReads)
+        assertArrayEquals(legacyBytes, f.legacy.encryptedFile.readBytes())
+        assertSame(originalKey, f.keys.key)
+        assertEquals(0, f.keys.replacements)
+        assertFalse(f.rootAuthorized)
+    }
+
+    @Test fun aNewProcessRefusesToReimportWhenOnlyEstablishedCiphertextWasLost() = fixture(encrypted = CONNECTION).use { f ->
+        assertEquals(StorageStatus.READY, f.coordinator.initialize())
+        val originalKey = f.keys.key
+        f.coordinator.close()
+        assertTrue(f.file.delete())
+        val reopened = EncryptedConfigurationDataStore({ f.file }, f.keys)
+        val coordinator = ConfigurationStorageCoordinator(
+            reopened, f.legacy, com.nezhahq.agent.core.security.RootModeMutationCoordinator {}
+        )
+        try {
+            assertEquals(StorageStatus.UNAVAILABLE, coordinator.initialize())
+            assertFalse(f.file.exists())
+            assertEquals(1, f.legacy.encryptedReads)
+            assertEquals(1, f.legacy.plainReads)
+            assertTrue(f.legacy.encryptedFile.exists())
+            assertSame(originalKey, f.keys.key)
+            assertEquals(1, f.keys.creates)
+        } finally { coordinator.close() }
+    }
+
+    @Test fun losingAnEstablishedEmptyTargetDoesNotSilentlyCreateAnotherEmptyStore() = fixture().use { f ->
+        assertEquals(StorageStatus.READY, f.coordinator.initialize())
+        f.coordinator.close()
+        assertTrue(f.file.delete())
+        f.reopen()
+        assertEquals(StorageStatus.UNAVAILABLE, f.coordinator.initialize())
+        assertFalse(f.file.exists())
+        assertEquals(1, f.keys.creates)
+        assertFalse(f.rootAuthorized)
+    }
+
+    @Test fun authorityMarkerFailurePreservesSourcesAndDoesNotPublishReady() = fixture(plain = CONNECTION).use { f ->
+        f.persistence.beforeEstablish = { throw IOException("marker write interrupted") }
+        assertEquals(StorageStatus.UNAVAILABLE, f.coordinator.initialize())
+        assertTrue(f.file.exists())
+        assertFalse(f.backend.hasEstablishedStorage())
+        assertNull(f.coordinator.current().document)
+        assertTrue(f.legacy.xml.exists())
+        assertTrue(f.legacy.backup.exists())
+        assertFalse(f.events.contains("deletePlaintext"))
+        f.persistence.beforeEstablish = {}
+        f.reopen()
+        assertEquals(StorageStatus.READY, f.coordinator.initialize())
+        assertTrue(f.backend.hasEstablishedStorage())
+        assertEquals(1, f.legacy.plainReads)
+        assertEquals(CONNECTION, f.backend.verify().values.entries)
+    }
+
+    @Test fun markerCommittedBeforeInterruptionProtectsMissingTargetOnRestart() = fixture(plain = CONNECTION).use { f ->
+        f.persistence.afterEstablish = { throw IOException("process interrupted after marker") }
+        assertEquals(StorageStatus.UNAVAILABLE, f.coordinator.initialize())
+        assertTrue(f.backend.hasEstablishedStorage())
+        assertTrue(f.legacy.xml.exists())
+        assertTrue(f.file.delete())
+        f.persistence.afterEstablish = {}
+        f.reopen()
+        assertEquals(StorageStatus.UNAVAILABLE, f.coordinator.initialize())
+        assertTrue(f.legacy.xml.exists())
+        assertEquals(1, f.legacy.plainReads)
+        assertFalse(f.file.exists())
+    }
+
+    @Test fun inProcessKnowledgeStillProtectsMissingTargetWhenMarkerCouldNotCommit() = fixture(plain = CONNECTION).use { f ->
+        f.persistence.beforeEstablish = { throw IOException("marker unavailable") }
+        assertEquals(StorageStatus.UNAVAILABLE, f.coordinator.initialize())
+        assertFalse(f.backend.hasEstablishedStorage())
+        assertTrue(f.file.delete())
+        f.persistence.beforeEstablish = {}
+        assertEquals(StorageStatus.UNAVAILABLE, f.coordinator.initialize(retry = true))
+        assertFalse(f.file.exists())
+        assertTrue(f.legacy.xml.exists())
+        assertEquals(1, f.legacy.plainReads)
+    }
+
+    @Test fun interruptedAuthorityMarkerRenameStillPreventsReimportAfterTargetLoss() = fixture(plain = CONNECTION).use { f ->
+        assertEquals(StorageStatus.READY, f.coordinator.initialize())
+        f.coordinator.close()
+        val marker = File(f.file.path + ".established")
+        assertTrue(marker.renameTo(File(marker.path + ".tmp")))
+        assertTrue(f.file.delete())
+        f.reopen()
+        assertEquals(StorageStatus.UNAVAILABLE, f.coordinator.initialize())
+        assertFalse(f.file.exists())
+        assertEquals(1, f.legacy.plainReads)
+    }
+
+    @Test fun explicitResetCanRebuildMissingEstablishedTargetWithoutImportingLegacy() = fixture(encrypted = CONNECTION).use { f ->
+        assertEquals(StorageStatus.READY, f.coordinator.initialize())
+        assertTrue(f.file.delete())
+        assertEquals(StorageStatus.UNAVAILABLE, f.coordinator.initialize(retry = true))
+        assertTrue(f.coordinator.reset())
+        assertTrue(f.backend.hasEstablishedStorage())
+        assertTrue(f.backend.verify().values.entries.isEmpty())
+        assertFalse(f.legacy.encryptedFile.exists())
+        assertEquals(1, f.legacy.encryptedReads)
+        assertFalse(f.rootAuthorized)
     }
 
     @Test fun corruptionAfterInitializationIsPreservedWhenNextWriteSeesCachedDataStoreState() = fixture(plain = CONNECTION).use { f ->
