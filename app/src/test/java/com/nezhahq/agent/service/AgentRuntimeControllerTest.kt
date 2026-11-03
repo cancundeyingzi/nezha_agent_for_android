@@ -2,7 +2,18 @@ package com.nezhahq.agent.service
 
 import com.nezhahq.agent.core.model.AgentConfig
 import com.nezhahq.agent.core.model.RemoteCapabilities
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -92,10 +103,6 @@ class AgentRuntimeControllerTest {
         assertTrue(controller.isRunning)
     }
 
-    /**
-     * Teardown is terminal: nothing would retry it after the service is gone, so withholding the
-     * privileged shell because the runtime failed would leak it for the rest of the process.
-     */
     @Test
     fun stopReleasesProcessResourcesEvenWhenTheRuntimeFailsToStop() = runBlocking {
         var finalCleanups = 0
@@ -133,30 +140,220 @@ class AgentRuntimeControllerTest {
         )
     }
 
-    /**
-     * Keep-alive must survive a botched cleanup: the replacement still starts, so the agent stays
-     * connected instead of the service stopping itself over a best-effort teardown.
-     */
     @Test
-    fun reloadStillStartsTheReplacementWhenTheOldRuntimeFailsToStop() = runBlocking {
-        val started = mutableListOf<String>()
+    fun failedOldCleanupPreventsCreationAndRetryStopsTheSameRuntimeFirst() = runBlocking {
+        val events = mutableListOf<String>()
         val teardownFailures = mutableListOf<Throwable>()
+        var failuresLeft = 2
         val controller = AgentRuntimeController(
             factory = AgentRuntimeFactory { snapshot ->
+                events += "create-${snapshot.server}"
                 RecordingRuntime(
-                    onStart = { started += snapshot.server },
-                    onStop = { error("teardown failed") }
+                    onStart = { events += "start-${snapshot.server}" },
+                    onStop = {
+                        events += "stop-${snapshot.server}"
+                        if (failuresLeft-- > 0) error("teardown failed")
+                    }
                 )
             },
             onTeardownFailure = { teardownFailures += it }
         )
         controller.reload(config("first"))
 
+        repeat(2) {
+            assertTrue(runCatching { controller.reload(config("second")) }.isFailure)
+            assertFalse(controller.isRunning)
+        }
+        assertEquals(
+            listOf("create-first", "start-first", "stop-first", "stop-first"),
+            events
+        )
+
         controller.reload(config("second"))
 
-        assertEquals(listOf("first", "second"), started)
-        assertEquals(listOf("teardown failed"), teardownFailures.map(Throwable::message))
+        assertEquals(
+            listOf("create-first", "start-first", "stop-first", "stop-first", "stop-first",
+                "create-second", "start-second"),
+            events
+        )
+        assertEquals(2, teardownFailures.size)
         assertTrue(controller.isRunning)
+    }
+
+    @Test
+    fun failedStartAndFailedDiscardRetainTheReplacementForCleanupRetry() = runBlocking {
+        val events = mutableListOf<String>()
+        var stops = 0
+        val controller = AgentRuntimeController(AgentRuntimeFactory { snapshot ->
+            events += "create-${snapshot.server}"
+            RecordingRuntime(
+                onStart = {
+                    events += "start-${snapshot.server}"
+                    if (snapshot.server == "broken") error("start failed")
+                },
+                onStop = {
+                    events += "stop-${snapshot.server}"
+                    if (++stops <= 2) error("stop failed")
+                }
+            )
+        })
+
+        val failure = runCatching { controller.reload(config("broken")) }.exceptionOrNull()
+        assertEquals("start failed", failure?.message)
+        assertEquals(listOf("stop failed"), failure?.suppressed?.map(Throwable::message))
+        assertFalse(controller.isRunning)
+        assertTrue(runCatching { controller.reload(config("next")) }.isFailure)
+        assertEquals(1, events.count { it.startsWith("create-") })
+
+        controller.reload(config("next"))
+
+        assertEquals(
+            listOf("create-broken", "start-broken", "stop-broken", "stop-broken", "stop-broken",
+                "create-next", "start-next"),
+            events
+        )
+    }
+
+    @Test
+    fun terminalStopRetriesFailedRuntimeAndProcessCleanupWithoutRestarting() = runBlocking {
+        var stops = 0
+        var finalCleanups = 0
+        val controller = AgentRuntimeController(
+            factory = AgentRuntimeFactory {
+                RecordingRuntime(onStop = { if (++stops == 1) error("stop failed") })
+            },
+            finalCleanup = { if (++finalCleanups == 1) error("cleanup failed") }
+        )
+        controller.reload(config("running"))
+
+        assertTrue(runCatching { controller.stop() }.isFailure)
+        controller.stop()
+        controller.stop()
+
+        assertEquals(2, stops)
+        assertEquals(2, finalCleanups)
+        assertFalse(controller.isRunning)
+        assertTrue(runCatching { controller.reload(config("after-stop")) }.isFailure)
+    }
+
+    @Test
+    fun cancelledReloadFinishesOldCleanupButDoesNotCreateReplacement() = runBlocking {
+        val stopping = CompletableDeferred<Unit>()
+        val finishStop = CompletableDeferred<Unit>()
+        var creates = 0
+        val controller = AgentRuntimeController(AgentRuntimeFactory {
+            creates++
+            RecordingRuntime(onStop = {
+                stopping.complete(Unit)
+                finishStop.await()
+            })
+        })
+        controller.reload(config("first"))
+        val reload = launch { controller.reload(config("cancelled")) }
+        withTimeout(2_000) { stopping.await() }
+
+        reload.cancel()
+        assertFalse(reload.isCompleted)
+        finishStop.complete(Unit)
+        withTimeout(2_000) { reload.join() }
+        controller.stop()
+
+        assertEquals(1, creates)
+        assertFalse(controller.isRunning)
+    }
+
+    @Test
+    fun cancelledStartRetainsFailedCleanupForTerminalStop() = runBlocking {
+        val starting = CompletableDeferred<Unit>()
+        var stops = 0
+        val controller = AgentRuntimeController(AgentRuntimeFactory {
+            RecordingRuntime(
+                onStart = { starting.complete(Unit); awaitCancellation() },
+                onStop = { if (++stops == 1) error("stop failed") }
+            )
+        })
+        val reload = launch { controller.reload(config("cancelled")) }
+        withTimeout(2_000) { starting.await() }
+
+        withTimeout(2_000) { reload.cancelAndJoin() }
+        controller.stop()
+
+        assertEquals(2, stops)
+        assertFalse(controller.isRunning)
+    }
+
+    @Test
+    fun cleanupCancellationWithAnActiveCallerRemainsRetryableAndReportingCannotHideIt() = runBlocking {
+        var stops = 0
+        var creates = 0
+        val controller = AgentRuntimeController(
+            factory = AgentRuntimeFactory {
+                creates++
+                RecordingRuntime(onStop = {
+                    if (++stops == 1) throw CancellationException("cleanup cancelled")
+                })
+            },
+            onTeardownFailure = { error("reporting failed") }
+        )
+        controller.reload(config("first"))
+
+        val failure = runCatching { controller.reload(config("second")) }.exceptionOrNull()
+        assertTrue(failure is RuntimeShutdownPendingException)
+        assertEquals("cleanup cancelled", failure?.cause?.message)
+        assertEquals(1, creates)
+        assertFalse(controller.isRunning)
+
+        controller.reload(config("second"))
+        assertEquals(2, creates)
+        assertTrue(controller.isRunning)
+    }
+
+    @Test
+    fun replacementWaitsForActualChildCoroutineFinalizerToFinish() = runBlocking {
+        val supervisor = SupervisorJob()
+        val finalizing = CompletableDeferred<Unit>()
+        val finishFinalizer = CompletableDeferred<Unit>()
+        val child = CoroutineScope(coroutineContext + supervisor).launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+                awaitCancellation()
+            } finally {
+                withContext(NonCancellable) {
+                    finalizing.complete(Unit)
+                    finishFinalizer.await()
+                }
+            }
+        }
+        var creates = 0
+        val coordinator = RuntimeShutdownCoordinator(
+            cancelAndJoinWork = { supervisor.cancelAndJoin() },
+            closeNetwork = {},
+            closeKeepAlive = {},
+            closeGrpc = {}
+        )
+        val controller = AgentRuntimeController(AgentRuntimeFactory {
+            creates++
+            if (creates == 1) RecordingRuntime(onStop = { coordinator.close() })
+            else RecordingRuntime()
+        })
+        controller.reload(config("first"))
+        val reload = launch { controller.reload(config("second")) }
+
+        try {
+            withTimeout(2_000) { finalizing.await() }
+            assertFalse(child.isCompleted)
+            assertFalse(reload.isCompleted)
+            assertEquals(1, creates)
+            finishFinalizer.complete(Unit)
+            withTimeout(2_000) { reload.join() }
+            assertTrue(child.isCompleted)
+            assertTrue(supervisor.isCompleted)
+            assertEquals(2, creates)
+        } finally {
+            finishFinalizer.complete(Unit)
+            supervisor.cancelAndJoin()
+            reload.cancelAndJoin()
+            controller.stop()
+        }
     }
 
     /**

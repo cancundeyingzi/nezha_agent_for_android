@@ -2,6 +2,7 @@ package com.nezhahq.agent.service
 
 import com.nezhahq.agent.core.model.AgentConfig
 import com.nezhahq.agent.core.model.RemoteCapabilities
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -11,6 +12,7 @@ import kotlinx.coroutines.withContext
 
 internal interface AgentRuntimeHandle {
     suspend fun start()
+    /** Returns only after owned work and connections have stopped; failure must remain retryable. */
     suspend fun stop()
     suspend fun updateCapabilities(capabilities: RemoteCapabilities)
 }
@@ -33,6 +35,9 @@ internal class AgentRuntimeController(
 ) {
     private val transitionMutex = Mutex()
     private var current: AgentRuntimeHandle? = null
+    // At most one: a replacement cannot be created until this handle has stopped successfully.
+    private var pendingTeardown: AgentRuntimeHandle? = null
+    private var terminal = false
     private var finalCleanupComplete = false
 
     val isRunning: Boolean
@@ -41,26 +46,31 @@ internal class AgentRuntimeController(
     /**
      * Replaces the runtime with one built from [config].
      *
-     * A teardown failure of the old runtime is reported but never aborts the replacement: its
-     * ownership is already released, and dropping the connection over a best-effort cleanup would
-     * take the agent — and its keep-alive resources — offline for no gain.
+     * Failed teardown retains ownership for the next retry. It is no longer a usable connection,
+     * so [isRunning] stays false while cleanup prevents a replacement from being created.
      */
     suspend fun reload(config: AgentConfig) {
         transitionMutex.withLock {
-            stopCurrent()?.let(onTeardownFailure)
-
-            // A service-destruction cancellation arriving during teardown must win before creation.
+            check(!terminal) { "A stopped runtime controller cannot be reused." }
+            val teardownFailure = stopCurrent()
+            // Cancellation wins even when the cleanup attempt also failed. Ownership is retained.
             currentCoroutineContext().ensureActive()
+            teardownFailure?.let { failure ->
+                runCatching { onTeardownFailure(failure) }.exceptionOrNull()
+                    ?.takeIf { it !== failure }?.let(failure::addSuppressed)
+                throw if (failure is CancellationException) RuntimeShutdownPendingException(failure)
+                else failure
+            }
 
             // Applied before the runtime exists: its collectors query the privileged shell as soon
             // as they start, and the release side lives in this class too so both ends are visible.
+            finalCleanupComplete = false
             applyPrivilegedAccess(config.rootMode)
 
             val replacement = factory.create(config)
             startOrDiscard(replacement)
             synchronized(this) {
                 current = replacement
-                finalCleanupComplete = false
             }
         }
     }
@@ -74,53 +84,61 @@ internal class AgentRuntimeController(
     /**
      * Terminal teardown. Process-owned resources are released even when the runtime failed to stop.
      *
-     * Nothing drives a retry once the service is gone, so withholding the privileged shell for a
-     * cleanup that will never run would leak it for the remaining lifetime of the process.
+     * [RuntimeShutdownGate] retries failed teardown after the service has gone. Independent process
+     * cleanup is still attempted on each failure, and only successful phases are forgotten.
      */
     suspend fun stop() {
         transitionMutex.withLock {
+            terminal = true
             val failures = listOfNotNull(stopCurrent(), releaseProcessResources())
             val primary = failures.firstOrNull() ?: return@withLock
-            failures.drop(1).forEach(primary::addSuppressed)
+            failures.drop(1).filter { it !== primary }.forEach(primary::addSuppressed)
             throw primary
         }
     }
 
     /**
-     * Stops the current runtime and gives up ownership of it either way.
-     *
-     * A runtime that failed to tear down is not reusable, so keeping it as [current] would only
-     * make [isRunning] report a connection that no longer runs.
+     * Moves the active runtime out of service before cleanup, retaining it until stop succeeds.
      */
     private suspend fun stopCurrent(): Throwable? {
-        val old = synchronized(this) { current.also { current = null } } ?: return null
-        return withContext(NonCancellable) { runCatching { old.stop() }.exceptionOrNull() }
+        val old = synchronized(this) {
+            current?.let {
+                check(pendingTeardown == null)
+                pendingTeardown = it
+                current = null
+            }
+            pendingTeardown
+        } ?: return null
+        return withContext(NonCancellable) {
+            runCatching {
+                old.stop()
+                synchronized(this@AgentRuntimeController) { pendingTeardown = null }
+            }.exceptionOrNull()
+        }
     }
 
     private suspend fun startOrDiscard(replacement: AgentRuntimeHandle) {
         try {
             replacement.start()
+            currentCoroutineContext().ensureActive()
         } catch (failure: Throwable) {
-            val cleanupFailure = withContext(NonCancellable) {
-                runCatching { replacement.stop() }.exceptionOrNull()
-            }
+            synchronized(this) { pendingTeardown = replacement }
+            val cleanupFailure = stopCurrent()
             if (cleanupFailure != null && cleanupFailure !== failure) {
                 failure.addSuppressed(cleanupFailure)
             }
+            currentCoroutineContext().ensureActive()
             throw failure
         }
     }
 
     private suspend fun releaseProcessResources(): Throwable? {
-        val shouldRelease = synchronized(this) {
-            if (finalCleanupComplete) {
-                false
-            } else {
+        if (finalCleanupComplete) return null
+        return withContext(NonCancellable) {
+            runCatching {
+                finalCleanup()
                 finalCleanupComplete = true
-                true
-            }
+            }.exceptionOrNull()
         }
-        if (!shouldRelease) return null
-        return withContext(NonCancellable) { runCatching { finalCleanup() }.exceptionOrNull() }
     }
 }

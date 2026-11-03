@@ -91,6 +91,91 @@ class GrpcManagerTest {
         assertNull(connection.stub)
     }
 
+    @Test
+    fun failedChannelShutdownRemainsOwnedAndCanBeRetried() {
+        var shutdownAttempts = 0
+        val connection = ManagedGrpcConnection(
+            config = config(useTls = true),
+            channelFactory = GrpcManagedChannelFactory { _, _ ->
+                FakeManagedChannel { if (++shutdownAttempts == 1) error("shutdown failed") }
+            }
+        )
+        connection.connect()
+
+        assertTrue(runCatching { connection.close() }.isFailure)
+        assertNull(connection.stub)
+        connection.close()
+        connection.close()
+
+        assertEquals(2, shutdownAttempts)
+        assertTrue(runCatching { connection.connect() }.isFailure)
+    }
+
+    @Test
+    fun terminalCloseWaitsWithinABoundAndRetainsAnUnterminatedChannelForRetry() {
+        val channel = FakeManagedChannel {}.apply { terminationReady = false }
+        val connection = ManagedGrpcConnection(
+            config = config(useTls = true),
+            channelFactory = GrpcManagedChannelFactory { _, _ -> channel }
+        )
+        connection.connect()
+
+        assertTrue(runCatching { connection.close() }.isFailure)
+        assertEquals(listOf(1_000L), channel.waitedMillis)
+        assertTrue(runCatching { connection.close() }.isFailure)
+        assertEquals(listOf(1_000L, 1_000L), channel.waitedMillis)
+        assertTrue(runCatching { connection.connect() }.isFailure)
+
+        channel.terminationReady = true
+        connection.close()
+        connection.close()
+        assertNull(connection.stub)
+    }
+
+    @Test
+    fun reconnectRetainsTheClosingChannelAndNeverBlocksWaitingForTermination() {
+        val first = FakeManagedChannel {}.apply { terminationReady = false }
+        var creates = 0
+        val connection = ManagedGrpcConnection(
+            config = config(useTls = true),
+            channelFactory = GrpcManagedChannelFactory { _, _ ->
+                if (++creates == 1) first else FakeManagedChannel {}
+            }
+        )
+        connection.connect()
+        connection.disconnect()
+
+        assertTrue(runCatching { connection.connect() }.isFailure)
+        assertEquals(1, creates)
+        assertNull(connection.stub)
+        assertTrue(first.waitedMillis.isEmpty())
+
+        first.terminationReady = true
+        connection.connect()
+        assertEquals(2, creates)
+        assertTrue(connection.stub != null)
+        assertTrue(first.waitedMillis.isEmpty())
+        connection.close()
+    }
+
+    @Test
+    fun failingStateSinkDoesNotPreventChannelTerminationAndCleanupRetry() {
+        val channel = FakeManagedChannel {}.apply { terminationReady = false }
+        val connection = ManagedGrpcConnection(
+            config = config(useTls = true),
+            stateSink = { error("UI state sink failed") },
+            channelFactory = GrpcManagedChannelFactory { _, _ -> channel }
+        )
+        connection.connect()
+
+        assertTrue(runCatching { connection.close() }.isFailure)
+        assertEquals(listOf(1_000L), channel.waitedMillis)
+        channel.terminationReady = true
+        connection.close()
+        connection.close()
+        assertNull(connection.stub)
+    }
+
     private fun config(useTls: Boolean) = AgentConfig(
         server = "example.com",
         port = 443,
@@ -104,22 +189,27 @@ class GrpcManagerTest {
         private val onClose: () -> Unit
     ) : ManagedChannel() {
         private var shutdown = false
+        var terminationReady = true
+        val waitedMillis = mutableListOf<Long>()
 
         override fun shutdown(): ManagedChannel = shutdownNow()
 
         override fun isShutdown(): Boolean = shutdown
 
-        override fun isTerminated(): Boolean = shutdown
+        override fun isTerminated(): Boolean = shutdown && terminationReady
 
         override fun shutdownNow(): ManagedChannel {
             if (!shutdown) {
-                shutdown = true
                 onClose()
+                shutdown = true
             }
             return this
         }
 
-        override fun awaitTermination(timeout: Long, unit: TimeUnit): Boolean = shutdown
+        override fun awaitTermination(timeout: Long, unit: TimeUnit): Boolean {
+            waitedMillis += unit.toMillis(timeout)
+            return isTerminated
+        }
 
         override fun <RequestT : Any?, ResponseT : Any?> newCall(
             methodDescriptor: MethodDescriptor<RequestT, ResponseT>,

@@ -12,6 +12,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -370,6 +371,138 @@ class AgentConfigCommandProcessorTest {
                 executor.shutdownNow()
             }
         }
+    }
+
+    @Test
+    fun failedOldCleanupReportsUnavailableAndRetryCleansBeforeCreatingOnce() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + SupervisorJob())
+        val unavailable = CompletableDeferred<Long>()
+        val releaseRetry = CompletableDeferred<Unit>()
+        val restarted = CompletableDeferred<Unit>()
+        val events = mutableListOf<String>()
+        var oldStops = 0
+        var rejected = 0
+        val controller = AgentRuntimeController(AgentRuntimeFactory { snapshot ->
+            events += "create-${snapshot.server}"
+            RecordingRuntime(
+                onStart = {
+                    events += "start-${snapshot.server}"
+                    if (snapshot.server == "next") restarted.complete(Unit)
+                },
+                onStop = {
+                    events += "stop-${snapshot.server}"
+                    if (snapshot.server == "old" && ++oldStops == 1) error("cleanup incomplete")
+                }
+            )
+        })
+        controller.reload(config("old"))
+        val processor = processor(
+            scope, kotlinx.coroutines.Dispatchers.Unconfined,
+            FakeConfigRepository(config("next")), controller,
+            onRuntimeUnavailable = { _, delayMillis -> unavailable.complete(delayMillis) },
+            onReloadRejected = { rejected++ },
+            delayBeforeRetry = { releaseRetry.await() }
+        )
+
+        try {
+            processor.requestReload()
+            assertEquals(5_000L, withTimeout(2_000) { unavailable.await() })
+            assertFalse(controller.isRunning)
+            assertEquals(0, rejected)
+            assertEquals(listOf("create-old", "start-old", "stop-old"), events)
+
+            releaseRetry.complete(Unit)
+            withTimeout(2_000) { restarted.await() }
+            controller.updateCapabilities(RemoteCapabilities())
+            assertTrue(controller.isRunning)
+            assertEquals(
+                listOf("create-old", "start-old", "stop-old", "stop-old", "create-next", "start-next"),
+                events
+            )
+        } finally {
+            processor.close()
+            controller.stop()
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun recreatedServiceCannotStartUntilFailedPreviousShutdownSucceeds() = runBlocking {
+        val shutdownScope = CoroutineScope(coroutineContext + SupervisorJob())
+        val commandScope = CoroutineScope(coroutineContext + SupervisorJob())
+        val shutdownFailed = CompletableDeferred<Unit>()
+        val releaseShutdownRetry = CompletableDeferred<Unit>()
+        val newServiceUnavailable = CompletableDeferred<Unit>()
+        val neverRetry = CompletableDeferred<Unit>()
+        val started = CompletableDeferred<Unit>()
+        var oldStops = 0
+        var creates = 0
+        val oldController = AgentRuntimeController(AgentRuntimeFactory {
+            RecordingRuntime(onStop = { if (++oldStops == 1) error("old shutdown failed") })
+        })
+        oldController.reload(config("old"))
+        val gate = RuntimeShutdownGate(
+            scope = shutdownScope,
+            delayBeforeRetry = { releaseShutdownRetry.await() },
+            onFailure = { shutdownFailed.complete(Unit) }
+        )
+        val shutdown = gate.submit { oldController.stop() }
+        val controller = AgentRuntimeController(AgentRuntimeFactory {
+            creates++
+            RecordingRuntime(onStart = { started.complete(Unit) })
+        })
+        val processor = processor(
+            commandScope, kotlinx.coroutines.Dispatchers.Unconfined,
+            FakeConfigRepository(config("recreated")), controller,
+            awaitPreviousShutdown = gate::awaitIdle,
+            onRuntimeUnavailable = { _, _ -> newServiceUnavailable.complete(Unit) },
+            delayBeforeRetry = { neverRetry.await() }
+        )
+
+        try {
+            withTimeout(2_000) { shutdownFailed.await() }
+            processor.requestReload()
+            withTimeout(2_000) { newServiceUnavailable.await() }
+            assertEquals(0, creates)
+            assertFalse(controller.isRunning)
+
+            releaseShutdownRetry.complete(Unit)
+            withTimeout(2_000) { shutdown.join() }
+            processor.requestReload()
+            withTimeout(2_000) { started.await() }
+            controller.updateCapabilities(RemoteCapabilities())
+            assertEquals(2, oldStops)
+            assertEquals(1, creates)
+        } finally {
+            processor.close()
+            controller.stop()
+            commandScope.cancel()
+            shutdownScope.cancel()
+        }
+    }
+
+    @Test
+    fun cancelImmediatelyClosesAdmissionWhileQueuedShutdownHasNotRun() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + SupervisorJob())
+        var creates = 0
+        val controller = AgentRuntimeController(AgentRuntimeFactory {
+            creates++
+            RecordingRuntime()
+        })
+        val processor = processor(
+            scope, kotlinx.coroutines.Dispatchers.Unconfined,
+            FakeConfigRepository(config("panel")), controller
+        )
+
+        processor.requestReload()
+        processor.cancel()
+        processor.requestReload()
+        processor.requestCapabilityRefresh()
+        processor.close()
+
+        assertEquals(0, creates)
+        controller.stop()
+        scope.cancel()
     }
 
     @Test

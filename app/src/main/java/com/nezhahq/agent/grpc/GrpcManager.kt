@@ -3,6 +3,7 @@ package com.nezhahq.agent.grpc
 import com.nezhahq.agent.core.model.AgentConfig
 import com.nezhahq.agent.util.Logger
 import io.grpc.ManagedChannel
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -83,6 +84,7 @@ internal class ManagedGrpcConnection(
 ) : GrpcConnection {
     private val lock = Any()
     private var channel: ManagedChannel? = null
+    private var closing = false
     private var closed = false
 
     @Volatile
@@ -93,8 +95,11 @@ internal class ManagedGrpcConnection(
         GrpcManager.resolveTransportMode(config.useTls)
 
     override fun connect() = synchronized(lock) {
-        check(!closed) { "A closed gRPC connection cannot be reused." }
+        check(!closing) { "A closed gRPC connection cannot be reused." }
         disconnectLocked(preserveConnectionState = true)
+        // Reconnect never blocks a caller. A channel still terminating is retried by the runtime's
+        // existing reconnect backoff, without losing the channel that terminal close must await.
+        check(channel == null) { "The previous gRPC channel has not terminated yet." }
         when (transportMode) {
             GrpcTransportMode.TLS ->
                 Logger.i("Grpc: 使用 TLS 加密连接 ${config.server}:${config.port}")
@@ -121,14 +126,34 @@ internal class ManagedGrpcConnection(
 
     override fun close() = synchronized(lock) {
         if (closed) return@synchronized
-        closed = true
+        closing = true
         disconnectLocked(preserveConnectionState = false)
+        // Called by runtime teardown on its IO worker. A timeout leaves ownership intact so the
+        // controller/gate can retry; merely requesting shutdown does not satisfy the stop contract.
+        channel?.let { remaining ->
+            check(remaining.awaitTermination(CLOSE_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
+                "The gRPC channel did not terminate within ${CLOSE_TIMEOUT_MILLIS}ms."
+            }
+            channel = null
+        }
+        closed = true
     }
 
     private fun disconnectLocked(preserveConnectionState: Boolean) {
-        channel?.shutdownNow()
-        channel = null
         stub = null
-        if (!preserveConnectionState) stateSink(GrpcConnectionState.IDLE)
+        channel?.let { previous ->
+            previous.shutdownNow()
+            if (previous.isTerminated) channel = null
+        }
+        if (!preserveConnectionState) {
+            // UI/reporting failures must not prevent confirmation of channel termination.
+            runCatching { stateSink(GrpcConnectionState.IDLE) }.onFailure { failure ->
+                runCatching { Logger.e("Grpc: 发布连接状态失败", failure) }
+            }
+        }
+    }
+
+    private companion object {
+        const val CLOSE_TIMEOUT_MILLIS = 1_000L
     }
 }

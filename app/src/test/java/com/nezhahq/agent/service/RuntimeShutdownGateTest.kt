@@ -3,10 +3,15 @@ package com.nezhahq.agent.service
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
@@ -97,37 +102,108 @@ class RuntimeShutdownGateTest {
         scope.cancel()
     }
 
-    /**
-     * Runtime teardown reports combined failures, so a throwing shutdown must be contained: it may
-     * neither reach the uncaught handler nor stop the queued shutdown behind it.
-     */
     @Test
-    fun aFailingShutdownIsReportedAndStillReleasesTheNextOne() {
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        val failures = mutableListOf<Throwable>()
-        val gate = RuntimeShutdownGate(scope) { synchronized(failures) { failures += it } }
-        val secondRan = AtomicBoolean(false)
+    fun failedShutdownRetainsTheQueueAndRetriesBeforeAllowingTheNextOne() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + SupervisorJob())
+        val failures = Channel<Throwable>(Channel.UNLIMITED)
+        val releaseRetry = Channel<Unit>()
+        val delays = mutableListOf<Long>()
+        val gate = RuntimeShutdownGate(
+            scope = scope,
+            delayBeforeRetry = { delays += it; releaseRetry.receive() },
+            onFailure = { failures.trySend(it) }
+        )
+        var attempts = 0
+        var secondRan = false
+        val first = gate.submit { if (++attempts <= 2) error("teardown failed") }
+        val second = gate.submit { secondRan = true }
 
-        val first = gate.submit { throw IllegalStateException("teardown failed") }
-        val second = gate.submit { secondRan.set(true) }
-        runBlocking { second.join() }
+        try {
+            repeat(2) {
+                assertEquals("teardown failed", withTimeout(2_000) { failures.receive() }.message)
+                val failure = runCatching { gate.awaitIdle() }.exceptionOrNull()
+                assertTrue(failure is RuntimeShutdownPendingException)
+                assertFalse(first.isCompleted)
+                assertFalse(secondRan)
+                releaseRetry.send(Unit)
+            }
+            withTimeout(2_000) { second.join(); gate.awaitIdle() }
 
-        assertTrue(first.isCompleted)
-        assertFalse(first.isCancelled)
-        assertTrue(secondRan.get())
-        assertEquals(1, synchronized(failures) { failures.size })
-        assertEquals("teardown failed", synchronized(failures) { failures.single().message })
-        scope.cancel()
+            assertTrue(first.isCompleted)
+            assertTrue(secondRan)
+            assertEquals(3, attempts)
+            assertEquals(listOf(5_000L, 10_000L), delays)
+        } finally {
+            scope.cancel()
+        }
     }
 
     @Test
-    fun awaitIdleReturnsAfterAFailingShutdownInsteadOfPropagatingIt() {
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    fun cancellingAnIdleWaitDoesNotCancelThePreviousShutdown() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + SupervisorJob())
         val gate = RuntimeShutdownGate(scope) { }
+        val release = CompletableDeferred<Unit>()
+        var finished = false
+        val shutdown = gate.submit { release.await(); finished = true }
+        val waiter = launch(start = CoroutineStart.UNDISPATCHED) { gate.awaitIdle() }
 
-        gate.submit { throw IllegalStateException("teardown failed") }
-        runBlocking { withTimeout(2_000) { gate.awaitIdle() } }
+        try {
+            waiter.cancelAndJoin()
+            assertFalse(shutdown.isCancelled)
+            assertFalse(finished)
+            release.complete(Unit)
+            withTimeout(2_000) { shutdown.join(); gate.awaitIdle() }
+            assertTrue(finished)
+        } finally {
+            release.complete(Unit)
+            scope.cancel()
+        }
+    }
 
-        scope.cancel()
+    @Test
+    fun cancellingTheCompletionHandleDoesNotReleaseOrCancelCleanup() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + SupervisorJob())
+        val gate = RuntimeShutdownGate(scope) { }
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val shutdown = gate.submit { entered.complete(Unit); release.await() }
+
+        try {
+            withTimeout(2_000) { entered.await() }
+            shutdown.cancelAndJoin()
+            var unlocked = false
+            val waiter = launch(start = CoroutineStart.UNDISPATCHED) {
+                gate.awaitIdle()
+                unlocked = true
+            }
+            assertFalse(unlocked)
+            release.complete(Unit)
+            withTimeout(2_000) { waiter.join() }
+            assertTrue(unlocked)
+        } finally {
+            release.complete(Unit)
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun aThrowingFailureReporterCannotStopCleanupRetries() = runBlocking {
+        val scope = CoroutineScope(coroutineContext + SupervisorJob())
+        val cleanupFailure = IllegalStateException("cleanup failed")
+        var attempts = 0
+        val gate = RuntimeShutdownGate(
+            scope = scope,
+            delayBeforeRetry = {},
+            onFailure = { error("reporting failed") }
+        )
+
+        try {
+            val shutdown = gate.submit { if (++attempts == 1) throw cleanupFailure }
+            withTimeout(2_000) { shutdown.join(); gate.awaitIdle() }
+            assertEquals(2, attempts)
+            assertEquals(listOf("reporting failed"), cleanupFailure.suppressed.map(Throwable::message))
+        } finally {
+            scope.cancel()
+        }
     }
 }

@@ -98,10 +98,13 @@ internal class AndroidRuntimeNetworkRegistrar(context: Context) : RuntimeNetwork
 private class IdempotentNetworkRegistration(
     private val unregister: () -> Unit
 ) : RuntimeNetworkRegistration {
-    private val closed = AtomicBoolean()
+    private var closed = false
 
-    override fun close() {
-        if (closed.compareAndSet(false, true)) unregister()
+    override fun close() = synchronized(this) {
+        if (!closed) {
+            unregister()
+            closed = true
+        }
     }
 }
 
@@ -183,8 +186,7 @@ internal class AgentRuntime(
             cleanupJob = null
         },
         closeNetwork = {
-            runCatching { networkRegistration?.close() }
-                .onFailure { Logger.e("AgentRuntime: 注销 NetworkCallback 异常", it) }
+            networkRegistration?.close()
             networkRegistration = null
         },
         closeKeepAlive = {

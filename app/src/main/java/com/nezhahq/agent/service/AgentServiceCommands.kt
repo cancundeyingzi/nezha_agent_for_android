@@ -130,10 +130,15 @@ internal class AgentConfigCommandProcessor(
      */
     fun requestCapabilityRefresh() = enqueue(ConfigApplyMode.CAPABILITIES_ONLY)
 
-    suspend fun close() {
+    /** Closes admission immediately; onDestroy must not wait for the shutdown queue to reach us. */
+    fun cancel() {
         if (closed.compareAndSet(false, true)) requests.close()
         cancelPendingRetry()
         worker.cancel()
+    }
+
+    suspend fun close() {
+        cancel()
         worker.join()
     }
 

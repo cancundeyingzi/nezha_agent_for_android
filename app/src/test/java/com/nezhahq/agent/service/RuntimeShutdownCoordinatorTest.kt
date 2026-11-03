@@ -1,10 +1,18 @@
 package com.nezhahq.agent.service
 
+import com.nezhahq.agent.SilentLoggerRule
+import com.nezhahq.agent.service.keepalive.KeepAliveController
+import com.nezhahq.agent.service.keepalive.KeepAliveResource
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
 
 class RuntimeShutdownCoordinatorTest {
+    @get:Rule
+    val silentLogger = SilentLoggerRule()
+
     @Test
     fun workAndAllResourcesCloseOnceInOrder() = runBlocking {
         val events = mutableListOf<String>()
@@ -80,5 +88,31 @@ class RuntimeShutdownCoordinatorTest {
             ),
             events
         )
+    }
+
+    @Test
+    fun optionalKeepAliveFailureStillClosesCoreWorkAndConnection() = runBlocking {
+        var auxiliaryAttempts = 0
+        val resource = object : KeepAliveResource {
+            override suspend fun setEnabled(enabled: Boolean) = Unit
+            override suspend fun close() {
+                auxiliaryAttempts++
+                error("optional resource failed")
+            }
+        }
+        val keepAlive = KeepAliveController(resource, resource, resource, resource)
+        val events = mutableListOf<String>()
+        val coordinator = RuntimeShutdownCoordinator(
+            cancelAndJoinWork = { events += "work-joined" },
+            closeNetwork = { events += "network-closed" },
+            closeKeepAlive = { assertTrue(keepAlive.closeWithin(2_000)) },
+            closeGrpc = { events += "channel-closed" }
+        )
+
+        coordinator.close()
+        coordinator.close()
+
+        assertEquals(4, auxiliaryAttempts)
+        assertEquals(listOf("work-joined", "network-closed", "channel-closed"), events)
     }
 }

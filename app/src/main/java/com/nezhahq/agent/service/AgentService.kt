@@ -69,7 +69,7 @@ class AgentService : Service() {
                 Logger.i("AgentService: process-owned RootShell resources closed.")
             },
             onTeardownFailure = { failure ->
-                Logger.e("AgentService: 旧运行时清理未完成，已继续启动新连接", failure)
+                Logger.e("AgentService: 旧运行时清理未完成，保留实例等待重试", failure)
             }
         )
         commandProcessor = AgentConfigCommandProcessor(
@@ -84,8 +84,8 @@ class AgentService : Service() {
             },
             onRuntimeUnavailable = { failure, retryDelayMillis ->
                 val retrySeconds = retryDelayMillis / MILLIS_PER_SECOND
-                Logger.e("AgentService: 探针启动失败，$retrySeconds 秒后重试", failure)
-                updateNotification("启动失败，$retrySeconds 秒后重试")
+                Logger.e("AgentService: 连接暂不可用，$retrySeconds 秒后重试", failure)
+                updateNotification("连接暂不可用，$retrySeconds 秒后重试")
             },
             onReloadRejected = { failure ->
                 Logger.e("AgentService: 重载被拒绝，继续使用当前连接", failure)
@@ -123,6 +123,7 @@ class AgentService : Service() {
         val processor = commandProcessor
         val controller = runtimeController
         val scope = commandScope
+        processor.cancel()
         SHUTDOWN_GATE.submit {
             try {
                 processor.close()
@@ -194,7 +195,7 @@ class AgentService : Service() {
 
         /** Outlives any single service instance so a restart waits for the previous teardown. */
         private val SHUTDOWN_GATE = RuntimeShutdownGate { failure ->
-            Logger.e("AgentService: 停机未完全成功，已继续释放其余资源", failure)
+            Logger.e("AgentService: 停机清理未完成，阻止新连接并退避重试", failure)
         }
 
         fun startOrReload(context: Context) = send(context, ACTION_START_OR_RELOAD)

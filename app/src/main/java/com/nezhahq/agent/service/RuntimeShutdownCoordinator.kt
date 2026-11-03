@@ -57,7 +57,7 @@ internal class RuntimeShutdownCoordinator(
 
     private fun List<Throwable>.throwCombinedIfAny() {
         val primary = firstOrNull() ?: return
-        drop(1).forEach(primary::addSuppressed)
+        drop(1).filter { it !== primary }.forEach(primary::addSuppressed)
         throw primary
     }
 }
