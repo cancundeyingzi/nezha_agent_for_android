@@ -10,7 +10,12 @@ import com.nezhahq.agent.mcp.helper.HelperSessionIdentity
 import java.io.FileInputStream
 
 /** One app_process per task, under the application UID. No shell, Service or retained process. */
-class ApplicationHelperLauncher(context: Context) : HelperLauncher {
+class ApplicationHelperLauncher internal constructor(
+    context: Context,
+    private val owner: HelperLifecycleOwner?
+) : HelperLauncher {
+    constructor(context: Context) : this(context, null)
+
     override val backend = HelperBackend.APPLICATION
     private val apk = context.applicationInfo.sourceDir
     private val files = context.filesDir.absoluteFile
@@ -19,7 +24,7 @@ class ApplicationHelperLauncher(context: Context) : HelperLauncher {
 
     override suspend fun launch(spec: HelperLaunchSpec): HelperProcessLease {
         require(spec.lifetimeMillis in 1..HelperProtocol.MAX_LIFETIME_MILLIS)
-        return HelperIoPools.launch.run(abandoned = { it.close() }) {
+        return HelperIoPools.launch.run(owner, abandoned = { it.close() }) {
             try {
                 // Every argument and environment value below comes from this app, never Task.data.
                 val builder = ProcessBuilder(
@@ -31,7 +36,7 @@ class ApplicationHelperLauncher(context: Context) : HelperLauncher {
                     clear()
                     putAll(HelperBootstrapEnvironment.create(apk, temporary.path, System.getenv()))
                 }
-                ApplicationHelperLease.start(uid, AndroidApplicationProcessControl) { builder.start() }
+                ApplicationHelperLease.start(uid, AndroidApplicationProcessControl, owner = owner) { builder.start() }
             } catch (failure: HelperFailure) {
                 throw failure
             } catch (_: Exception) {

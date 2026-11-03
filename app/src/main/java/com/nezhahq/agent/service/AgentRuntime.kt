@@ -32,6 +32,8 @@ import com.nezhahq.agent.mcp.McpTaskBackend
 import com.nezhahq.agent.mcp.exec.McpExecBackend
 import com.nezhahq.agent.mcp.fs.McpFsBackend
 import com.nezhahq.agent.mcp.privileged.McpHelperLaunchers
+import com.nezhahq.agent.mcp.transport.HelperLifecycleOwner
+import com.nezhahq.agent.mcp.transport.McpHelperTransport
 import com.nezhahq.agent.service.keepalive.KeepAliveController
 import com.nezhahq.agent.util.DashboardSessionWatchdog
 import com.nezhahq.agent.util.Logger
@@ -152,9 +154,10 @@ internal class AgentRuntime(
      */
     private val geoIpReportJob = AtomicReference<Job?>(null)
     private val currentMcpSession = AtomicReference<McpSession?>()
-    private val mcpLauncher = McpHelperLaunchers.select(appContext, config.rootMode)
-    private val mcpExec = McpExecBackend(mcpLauncher)
-    private val mcpFs = McpFsBackend(mcpLauncher)
+    private val helperLifecycle = HelperLifecycleOwner()
+    private val mcpLauncher = McpHelperLaunchers.select(appContext, config.rootMode, helperLifecycle)
+    private val mcpExec = McpExecBackend(mcpLauncher, McpHelperTransport(helperLifecycle))
+    private val mcpFs = McpFsBackend(mcpLauncher, McpHelperTransport(helperLifecycle))
     private val mcpBackend = McpTaskBackend { task, snapshot, reserveResult ->
         when (McpPolicy.family(task.type)) {
             McpTaskFamily.EXEC -> mcpExec.execute(task, snapshot, reserveResult = reserveResult)
@@ -181,7 +184,9 @@ internal class AgentRuntime(
     private var networkRegistration: RuntimeNetworkRegistration? = null
     private val shutdownCoordinator = RuntimeShutdownCoordinator(
         cancelAndJoinWork = {
+            helperLifecycle.beginShutdown()
             supervisor.cancelAndJoin()
+            helperLifecycle.close()
             connectionJob = null
             cleanupJob = null
         },

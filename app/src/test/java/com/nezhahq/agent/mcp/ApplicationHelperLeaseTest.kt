@@ -10,6 +10,7 @@ import java.io.IOException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -279,7 +280,25 @@ class ApplicationHelperLeaseTest {
         process.awaitCleanupCheckAfter(checks)
         assertFalse(lease.cleanupComplete)
         assertEquals(1, cleanup.retainedProcesses)
-        process.assertPipesClosedOnce()
+        process.assertPipesClosed(controlAttempts = 2)
+    }
+
+    @Test fun transientPipeCloseFailureRetriesTheCapturedPipeBeforeOwnerCanClose() = runBlocking {
+        val owner = HelperLifecycleOwner()
+        val process = FakeProcess().apply { controlCloseFailure = IOException("temporary close failure") }
+        val lease = ApplicationHelperLease.start(10213, FakeControl(), cleanup, owner) { process }
+        process.exit = 0
+        lease.close()
+        process.awaitPipeCloseAttempts()
+        assertFalse(lease.cleanupComplete)
+        assertEquals(1, cleanup.retainedProcesses)
+
+        process.controlCloseFailure = null
+        owner.close(2_000)
+
+        assertTrue(lease.cleanupComplete)
+        assertEquals(0, cleanup.retainedProcesses)
+        process.assertPipesClosed(controlAttempts = 2)
     }
 
     @Test fun blockedBufferedRequestWriterReturnsPromptlyAndOnlyRealExitRestoresAdmission() {
@@ -423,9 +442,10 @@ class ApplicationHelperLeaseTest {
             while (cleanupChecks.get() <= previous && System.nanoTime() < until) Thread.sleep(1)
             assertTrue("Original Process exit was not checked", cleanupChecks.get() > previous)
         }
-        fun assertPipesClosedOnce() {
+        fun assertPipesClosedOnce() = assertPipesClosed(controlAttempts = 1)
+        fun assertPipesClosed(controlAttempts: Int) {
             assertEquals(listOf(1, 1, 1), listOf(controlGets.get(), inputGets.get(), errorGets.get()))
-            assertEquals(listOf(1, 1, 1), listOf(controlCloses, inputCloses, errorCloses))
+            assertEquals(listOf(controlAttempts, 1, 1), listOf(controlCloses, inputCloses, errorCloses))
         }
         override fun exitValue(): Int {
             val failure = statusFailure

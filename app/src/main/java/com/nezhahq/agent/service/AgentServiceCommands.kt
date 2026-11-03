@@ -103,13 +103,15 @@ internal class AgentConfigCommandProcessor(
     private val closed = AtomicBoolean()
     private val retryLock = Any()
     private var retryJob: Job? = null
+    private var generation = 0L
+    private var pendingRetry: Long? = null
 
     private val worker: Job = scope.launch {
         for (ignored in requests) {
             drainRedundantWakeUps()
-            val mode = pendingMode.take() ?: continue
+            val request = takeRequest() ?: continue
             when (val outcome = loadConfig()) {
-                is ConfigLoadOutcome.Ready -> applyOrReport(mode, outcome.config)
+                is ConfigLoadOutcome.Ready -> applyOrReport(request, outcome.config)
                 is ConfigLoadOutcome.Failed -> reportConfigurationFailure(outcome.error)
             }
         }
@@ -122,9 +124,12 @@ internal class AgentConfigCommandProcessor(
      * restarts the backoff instead of making the user wait out the previous schedule.
      */
     fun requestReload() {
-        cancelPendingRetry()
-        retryPolicy.reset()
-        enqueue(ConfigApplyMode.RELOAD)
+        synchronized(retryLock) {
+            if (closed.get()) return
+            invalidateRetry()
+            retryPolicy.reset()
+            enqueue(ConfigApplyMode.RELOAD)
+        }
     }
 
     /**
@@ -147,10 +152,19 @@ internal class AgentConfigCommandProcessor(
     }
 
     private fun enqueue(mode: ConfigApplyMode) {
-        if (closed.get()) return
-        // Recorded before the wake-up so the worker always finds a mode waiting for it.
-        pendingMode.record(mode)
-        requests.trySend(Unit)
+        synchronized(retryLock) {
+            if (closed.get()) return
+            // Recorded before the wake-up so the worker always finds a mode waiting for it.
+            pendingMode.record(mode)
+            requests.trySend(Unit)
+        }
+    }
+
+    private fun takeRequest(): ApplyRequest? = synchronized(retryLock) {
+        val explicit = pendingMode.take()
+        val retry = pendingRetry.also { pendingRetry = null }
+        val mode = if (retry == generation) ConfigApplyMode.RELOAD else explicit
+        mode?.let { ApplyRequest(it, generation) }
     }
 
     private fun drainRedundantWakeUps() {
@@ -166,15 +180,22 @@ internal class AgentConfigCommandProcessor(
         )
     }
 
-    private suspend fun applyOrReport(mode: ConfigApplyMode, config: AgentConfig) {
+    private suspend fun applyOrReport(request: ApplyRequest, config: AgentConfig) {
         try {
             awaitPreviousShutdown()
-            apply(mode, config)
-            retryPolicy.reset()
+            apply(request.mode, config)
+            // A capability-only no-op while offline must not consume the pending start retry.
+            if (controller.isRunning) synchronized(retryLock) {
+                if (generation == request.generation) {
+                    invalidateRetry()
+                    retryPolicy.reset()
+                }
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (failure: Throwable) {
-            if (controller.isRunning) report { onReloadRejected(failure) } else scheduleRetry(failure)
+            if (controller.isRunning) report { onReloadRejected(failure) }
+            else scheduleRetry(failure, request.generation)
         }
     }
 
@@ -195,18 +216,24 @@ internal class AgentConfigCommandProcessor(
         }
     }
 
-    private suspend fun scheduleRetry(failure: Throwable) {
+    private suspend fun scheduleRetry(failure: Throwable, failedGeneration: Long) {
         currentCoroutineContext().ensureActive()
-        if (closed.get()) return
-        val retryDelayMillis = retryPolicy.nextDelayMillis()
-        val scheduled = scope.launch(start = CoroutineStart.LAZY) {
-            delayBeforeRetry(retryDelayMillis)
-            enqueue(ConfigApplyMode.RELOAD)
-        }
+        val retryDelayMillis: Long
+        val scheduled: Job
         synchronized(retryLock) {
-            if (closed.get()) {
-                scheduled.cancel()
-                return
+            // A newer explicit reload already owns recovery from this in-flight failure.
+            if (closed.get() || generation != failedGeneration) return
+            invalidateRetry()
+            val retryGeneration = generation
+            retryDelayMillis = retryPolicy.nextDelayMillis()
+            scheduled = scope.launch(start = CoroutineStart.LAZY) {
+                delayBeforeRetry(retryDelayMillis)
+                synchronized(retryLock) {
+                    if (!closed.get() && generation == retryGeneration) {
+                        pendingRetry = retryGeneration
+                        requests.trySend(Unit)
+                    }
+                }
             }
             retryJob = scheduled
         }
@@ -221,9 +248,16 @@ internal class AgentConfigCommandProcessor(
     }
 
     private fun cancelPendingRetry() {
-        synchronized(retryLock) {
-            retryJob?.cancel()
-            retryJob = null
-        }
+        synchronized(retryLock) { invalidateRetry() }
     }
+
+    /** Called under retryLock; also invalidates timers that already queued their wake-up. */
+    private fun invalidateRetry() {
+        generation++
+        pendingRetry = null
+        retryJob?.cancel()
+        retryJob = null
+    }
+
+    private data class ApplyRequest(val mode: ConfigApplyMode, val generation: Long)
 }

@@ -25,7 +25,9 @@ sealed interface HelperExchangeResult {
  * stderr drainer. The mandatory reservation callback runs after RESULT's validated length header,
  * before its payload allocation/read/parse. Waiting consumes no IO worker or unbounded queue.
  */
-class McpHelperTransport {
+class McpHelperTransport internal constructor(private val owner: HelperLifecycleOwner?) {
+    constructor() : this(null)
+
     private val sessions = Semaphore(4)
 
     suspend fun exchange(
@@ -52,7 +54,7 @@ class McpHelperTransport {
                     .also { lease = it }
             }
             if (ownedProcess.backend != launcher.backend || ownedProcess.expectedUid < 0) throw capabilityFailure()
-            HelperIoPools.diagnostic.discard {
+            HelperIoPools.diagnostic.discard(owner) {
                 // Startup diagnostics can contain platform details. Retain/log nothing; bound total
                 // work as well as memory, then close the diagnostic pipe independently of stdout.
                 ownedProcess.stderr.let { input ->
@@ -68,7 +70,7 @@ class McpHelperTransport {
             val reader = HelperProtocol.Reader(ownedProcess.stdout)
             val writer = HelperProtocol.Writer(ownedProcess.stdin)
             val hello = within(deadline) {
-                HelperIoPools.protocol.run {
+                HelperIoPools.protocol.run(owner) {
                     val header = reader.header(setOf(HelperProtocol.Kind.HELLO, HelperProtocol.Kind.UNAVAILABLE))
                     val bytes = reader.payload(header)
                     if (header.kind != HelperProtocol.Kind.HELLO) throw capabilityFailure()
@@ -76,7 +78,7 @@ class McpHelperTransport {
                 }
             }
             within(deadline) {
-                HelperIoPools.protocol.run {
+                HelperIoPools.protocol.run(owner) {
                     if (!hello.verified(nonce, ownedProcess.expectedUid)) throw capabilityFailure()
                     ownedProcess.acceptIdentity(hello)
                     verified = true
@@ -96,7 +98,7 @@ class McpHelperTransport {
                 HelperProtocol.Kind.TRUNCATED, HelperProtocol.Kind.RESULT
             )
             while (true) {
-                val header = within(deadline) { HelperIoPools.protocol.run { reader.header(allowed) } }
+                val header = within(deadline) { HelperIoPools.protocol.run(owner) { reader.header(allowed) } }
                 if (header.kind == HelperProtocol.Kind.RESULT) {
                     // No read/ByteArray(header.length) has occurred yet. Callers retain this lease
                     // through their final send/drop, even after this helper has been destroyed.
@@ -106,7 +108,7 @@ class McpHelperTransport {
                     catch (failure: Exception) { throw ReservationRefused(failure) }
                     reservation = resultReservation
                     val payload = within(HelperDeadline.afterMillis(RESULT_TRANSFER_MILLIS)) {
-                        HelperIoPools.protocol.run { reader.payload(header) }
+                        HelperIoPools.protocol.run(owner) { reader.payload(header) }
                     }
                     currentCoroutineContext().ensureActive()
                     val result = TaskResult.parseFrom(payload)
@@ -119,7 +121,7 @@ class McpHelperTransport {
                     reservation = null
                     return HelperExchangeResult.Completed(owned)
                 }
-                val bytes = within(deadline) { HelperIoPools.protocol.run { reader.payload(header) } }
+                val bytes = within(deadline) { HelperIoPools.protocol.run(owner) { reader.payload(header) } }
                 when (header.kind) {
                     HelperProtocol.Kind.STDOUT -> capture!!.accept(ExecOutput.Bytes(false, bytes))
                     HelperProtocol.Kind.STDERR -> capture!!.accept(ExecOutput.Bytes(true, bytes))

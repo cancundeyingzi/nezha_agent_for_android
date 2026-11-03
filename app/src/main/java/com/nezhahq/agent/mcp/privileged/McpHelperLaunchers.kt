@@ -4,6 +4,7 @@ import android.content.Context
 import com.nezhahq.agent.mcp.transport.ApplicationHelperLauncher
 import com.nezhahq.agent.mcp.transport.HelperBackend
 import com.nezhahq.agent.mcp.transport.HelperIoPools
+import com.nezhahq.agent.mcp.transport.HelperLifecycleOwner
 import com.nezhahq.agent.mcp.transport.HelperLaunchSpec
 import com.nezhahq.agent.mcp.transport.HelperLauncher
 import com.nezhahq.agent.mcp.transport.HelperProcessLease
@@ -12,12 +13,15 @@ import com.nezhahq.agent.util.RootShell
 
 object McpHelperLaunchers {
     /** The false branch performs no RootShell, su or Shizuku discovery/initialization. */
-    fun select(context: Context, rootMode: Boolean): HelperLauncher = helperLauncherForMode(rootMode, {
-        ApplicationHelperLauncher(context)
-    }, {
-        PrivilegedHelperLauncher(context.applicationInfo.sourceDir, System.getenv(), RootShell.mcpAuthority,
-            AndroidPrivilegedGateway)
-    })
+    fun select(context: Context, rootMode: Boolean): HelperLauncher = select(context, rootMode, null)
+
+    internal fun select(context: Context, rootMode: Boolean, owner: HelperLifecycleOwner?): HelperLauncher =
+        helperLauncherForMode(rootMode, {
+            ApplicationHelperLauncher(context, owner)
+        }, {
+            PrivilegedHelperLauncher(context.applicationInfo.sourceDir, System.getenv(), RootShell.mcpAuthority,
+                AndroidPrivilegedGateway, owner)
+        })
 }
 
 internal fun helperLauncherForMode(
@@ -28,19 +32,20 @@ internal class PrivilegedHelperLauncher(
     private val apk: String,
     private val platformEnvironment: Map<String, String>,
     private val authority: PrivilegedHelperAuthority,
-    private val gateway: PrivilegedGateway
+    private val gateway: PrivilegedGateway,
+    private val owner: HelperLifecycleOwner? = null
 ) : HelperLauncher {
     @Volatile private var selected = HelperBackend.ROOT
     override val backend: HelperBackend get() = selected
 
     override suspend fun launch(spec: HelperLaunchSpec): HelperProcessLease {
         require(spec.lifetimeMillis in 1..HelperProtocol.MAX_LIFETIME_MILLIS)
-        return HelperIoPools.launch.run(abandoned = { it.close() }) {
+        return HelperIoPools.launch.run(owner, abandoned = { it.close() }) {
             val permit = authority.acquire()
             try {
                 selected = permit.backend
                 val program = TrustedHelperProgram(apk, platformEnvironment, spec)
-                PrivilegedHelperLease.start(permit, program) {
+                PrivilegedHelperLease.start(permit, program, owner = owner) {
                     permit.requireLaunch()
                     if (permit.backend == HelperBackend.SHIZUKU) permit.service!!.launch(
                         program.argv, program.environment.entries.map { "${it.key}=${it.value}" }.toTypedArray(),

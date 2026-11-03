@@ -4,6 +4,7 @@ import com.nezhahq.agent.core.mcp.McpBusinessError
 import com.nezhahq.agent.core.mcp.McpErrorCode
 import com.nezhahq.agent.mcp.transport.HelperFailure
 import com.nezhahq.agent.mcp.transport.HelperBackend
+import com.nezhahq.agent.mcp.transport.HelperLifecycleOwner
 import com.nezhahq.agent.mcp.transport.HelperProcessCleanup
 import com.nezhahq.agent.mcp.transport.HelperProcessLease
 import com.nezhahq.agent.mcp.transport.HelperProcessResources
@@ -29,7 +30,10 @@ internal class PrivilegedHelperLease private constructor(
     private var launchFinished = false
     private var nativeAttempted = false
     private var closed = false
-    private val pipesClosed = AtomicBoolean(false)
+    private var controlClosed = false
+    private var outputClosed = false
+    private var diagnosticClosed = false
+    private var proxyDestroyAttempted = false
     private val cleanupScheduled = AtomicBoolean(false)
     @Volatile internal var acceptedIdentity: HelperProtocol.Hello? = null
         private set
@@ -99,15 +103,16 @@ internal class PrivilegedHelperLease private constructor(
         needsProbe = canProbe
         PrivilegedHelperReconciler.retain(this)
         ticket.scheduleUntil {
-            if (pipesClosed.compareAndSet(false, true)) {
-                // Original control EOF makes HelperMain kill its own UID/session. No App-UID kill,
-                // no proxy destroy after HELLO acceptance, and no blocking IO on the caller.
-                runCatching { control?.close() }
-                runCatching { output?.close() }
-                runCatching { diagnostic?.close() }
-                // Before any accepted identity/payload, a failed first pipe getter may leave no
-                // control channel at all. Destroy the proxy; without HELLO, unknown remains owned.
-                if (control == null && acceptedIdentity == null) runCatching { process?.destroy() }
+            // Only captured pipes are retried. Successful closes are not repeated and no Process
+            // getter is re-entered (a Shizuku getter can allocate another remote relay/PFD).
+            if (!controlClosed) controlClosed = runCatching { control?.close() }.isSuccess
+            if (!outputClosed) outputClosed = runCatching { output?.close() }.isSuccess
+            if (!diagnosticClosed) diagnosticClosed = runCatching { diagnostic?.close() }.isSuccess
+            // Original control EOF keeps the existing UID/session cleanup policy. Before any
+            // accepted identity/payload, a missing control channel still permits proxy destroy.
+            if (!proxyDestroyAttempted && control == null && acceptedIdentity == null) {
+                proxyDestroyAttempted = true
+                runCatching { process?.destroy() }
             }
             val owned = process
             var knownExited = owned == null && !nativeAttempted
@@ -121,8 +126,9 @@ internal class PrivilegedHelperLease private constructor(
                     Thread.sleep(10)
                 } while (System.nanoTime() < until)
             }
-            val complete = knownExited || proofCoversBundle()
-            needsProbe = !complete && canProbe
+            val exitProven = knownExited || proofCoversBundle()
+            val complete = controlClosed && outputClosed && diagnosticClosed && exitProven
+            needsProbe = !exitProven && canProbe
             if (complete) PrivilegedHelperReconciler.release(this)
             complete
         }
@@ -145,9 +151,10 @@ internal class PrivilegedHelperLease private constructor(
             permit: PrivilegedHelperAuthority.Permit,
             program: TrustedHelperProgram,
             cleanup: HelperProcessCleanup = HelperProcessResources.cleanup,
+            owner: HelperLifecycleOwner? = null,
             launch: () -> Process
         ): PrivilegedHelperLease {
-            val ticket = cleanup.tryAcquire() ?: run {
+            val ticket = cleanup.tryAcquire(owner) ?: run {
                 permit.close()
                 throw HelperFailure(McpBusinessError(McpErrorCode.BUSY, "MCP helper process cleanup capacity is busy"))
             }

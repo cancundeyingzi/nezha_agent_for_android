@@ -2,6 +2,7 @@ package com.nezhahq.agent.mcp.transport
 
 import com.nezhahq.agent.core.mcp.McpBusinessError
 import com.nezhahq.agent.core.mcp.McpErrorCode
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import proto.Nezha.TaskResult
 import java.io.InputStream
@@ -92,26 +93,57 @@ internal class HelperBlockingPool(name: String, workers: Int) {
     ).apply { allowCoreThreadTimeOut(true) }
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-    suspend fun <T> run(abandoned: (T) -> Unit = {}, block: () -> T): T =
+    suspend fun <T> run(
+        owner: HelperLifecycleOwner? = null,
+        abandoned: (T) -> Unit = {},
+        block: () -> T
+    ): T =
         suspendCancellableCoroutine { continuation ->
-            try {
-                executor.execute {
-                    if (!continuation.isActive) return@execute
+            val activity = owner?.registerActivity {
+                continuation.cancel(CancellationException("MCP helper runtime is closing"))
+            }
+            val task = Runnable {
+                if (activity?.start() == false) return@Runnable
+                try {
+                    if (!continuation.isActive) return@Runnable
                     try {
                         val result = block()
                         continuation.resume(result) { runCatching { abandoned(result) } }
                     } catch (failure: Throwable) {
                         continuation.resumeWithException(failure)
                     }
+                } finally {
+                    activity?.finish()
+                }
+            }
+            continuation.invokeOnCancellation {
+                activity?.discardQueued()
+                executor.remove(task)
+            }
+            try {
+                executor.execute(task)
+                if (!continuation.isActive) {
+                    activity?.discardQueued()
+                    executor.remove(task)
                 }
             } catch (_: RejectedExecutionException) {
+                activity?.finish()
                 continuation.resumeWithException(busy())
             }
         }
 
-    fun discard(block: () -> Unit) {
-        try { executor.execute { try { block() } catch (_: Exception) { /* No sensitive logs. */ } } }
-        catch (_: RejectedExecutionException) { throw busy() }
+    fun discard(owner: HelperLifecycleOwner? = null, block: () -> Unit) {
+        val activity = owner?.registerActivity()
+        try {
+            executor.execute {
+                if (activity?.start() == false) return@execute
+                try { block() } catch (_: Exception) { /* No sensitive logs. */ }
+                finally { activity?.finish() }
+            }
+        } catch (_: RejectedExecutionException) {
+            activity?.finish()
+            throw busy()
+        }
     }
 
     private fun busy() = HelperFailure(McpBusinessError(McpErrorCode.BUSY, "MCP helper IO workers are busy"))

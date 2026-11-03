@@ -26,15 +26,21 @@ internal class HelperProcessCleanup(val capacity: Int = 4) {
     ).apply { allowCoreThreadTimeOut(true) }
     val retainedProcesses: Int get() = capacity - slots.availablePermits()
 
-    fun tryAcquire(): Ticket? {
+    fun tryAcquire(owner: HelperLifecycleOwner? = null): Ticket? {
         if (!slots.tryAcquire()) {
             active.take(capacity).forEach { it.retryRetained() }
             return null
         }
-        return Ticket().also { active.add(it) }
+        val ticket = Ticket(owner)
+        active.add(ticket)
+        if (owner != null && !owner.retain(ticket)) {
+            ticket.releaseUnused()
+            return null
+        }
+        return ticket
     }
 
-    inner class Ticket internal constructor() {
+    inner class Ticket internal constructor(private val owner: HelperLifecycleOwner?) {
         private val state = AtomicInteger(0) // reserved, scheduled, retained, released
         private val retryRequested = AtomicBoolean(false)
         @Volatile private var cleanup: (() -> Boolean)? = null
@@ -86,6 +92,7 @@ internal class HelperProcessCleanup(val capacity: Int = 4) {
             active.remove(this)
             slots.release()
             finished = true
+            owner?.released(this)
         }
     }
 }

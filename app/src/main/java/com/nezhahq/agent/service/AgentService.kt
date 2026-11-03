@@ -14,6 +14,7 @@ import androidx.core.content.ContextCompat
 import com.nezhahq.agent.R
 import com.nezhahq.agent.appContainer
 import com.nezhahq.agent.grpc.ManagedGrpcConnection
+import com.nezhahq.agent.mcp.transport.hasPendingHelperShutdown
 import com.nezhahq.agent.util.Logger
 import com.nezhahq.agent.util.RootShell
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -84,7 +85,11 @@ class AgentService : Service() {
             onRuntimeUnavailable = { failure, retryDelayMillis ->
                 val retrySeconds = retryDelayMillis / MILLIS_PER_SECOND
                 Logger.e("AgentService: 连接暂不可用，$retrySeconds 秒后重试", failure)
-                updateNotification("连接暂不可用，$retrySeconds 秒后重试")
+                updateNotification(if (failure.hasPendingHelperShutdown()) {
+                    "旧 MCP 任务退出尚未确认，$retrySeconds 秒后重试；授权失效时请恢复原授权"
+                } else {
+                    "连接暂不可用，$retrySeconds 秒后重试"
+                })
             },
             onReloadRejected = { failure ->
                 Logger.e("AgentService: 重载被拒绝，继续使用当前连接", failure)

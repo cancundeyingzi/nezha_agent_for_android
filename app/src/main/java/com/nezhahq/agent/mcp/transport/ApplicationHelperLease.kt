@@ -100,9 +100,10 @@ internal class ApplicationHelperLease private constructor(
             expectedUid: Int,
             control: ApplicationProcessControl,
             cleanup: HelperProcessCleanup = HelperProcessResources.cleanup,
+            owner: HelperLifecycleOwner? = null,
             launch: () -> Process
         ): ApplicationHelperLease {
-            val ticket = cleanup.tryAcquire() ?: throw HelperFailure(McpBusinessError(
+            val ticket = cleanup.tryAcquire(owner) ?: throw HelperFailure(McpBusinessError(
                 McpErrorCode.BUSY, "MCP helper process cleanup capacity is busy"
             ))
             var process: Process? = null
@@ -119,18 +120,25 @@ internal class ApplicationHelperLease private constructor(
         }
 
         private fun scheduleCleanup(process: Process, ticket: HelperProcessCleanup.Ticket, beforeClose: () -> Unit) {
-            var pipesClosed: Boolean? = null
+            var closeCapturedPipes: (() -> Boolean)? = null
             ticket.scheduleUntil {
-                if (pipesClosed == null) {
+                if (closeCapturedPipes == null) {
                     beforeClose()
-                    // Keep the same owner on retries. A close may block on a writer, and neither
-                    // stream getters nor close attempts may be repeated by admission pressure.
-                    pipesClosed = closePipes(process)
+                    val control = capturePipeClose { process.outputStream }
+                    val output = capturePipeClose { process.inputStream }
+                    val error = capturePipeClose { process.errorStream }
+                    closeCapturedPipes = {
+                        val controlClosed = control()
+                        val outputClosed = output()
+                        val errorClosed = error()
+                        controlClosed && outputClosed && errorClosed
+                    }
                 }
+                val pipesClosed = closeCapturedPipes!!.invoke()
                 // Sending SIGKILL or control EOF is not proof of exit. exitValue is nonblocking
                 // on API 23 and stays bound to this Process even if its old numeric PID is reused.
                 val exited = awaitExit(process)
-                pipesClosed == true && exited
+                pipesClosed && exited
             }
         }
 
@@ -157,11 +165,14 @@ internal class ApplicationHelperLease private constructor(
             return false
         }
 
-        private fun closePipes(process: Process): Boolean {
-            val controlClosed = runCatching { process.outputStream.close() }.isSuccess
-            val outputClosed = runCatching { process.inputStream.close() }.isSuccess
-            val errorClosed = runCatching { process.errorStream.close() }.isSuccess
-            return controlClosed && outputClosed && errorClosed
+        /** A failed close retries the captured object; successful closes and getters run once. */
+        private fun capturePipeClose(get: () -> AutoCloseable): () -> Boolean {
+            val pipe = runCatching(get).getOrNull()
+            var closed = false
+            return {
+                if (!closed && pipe != null) closed = runCatching { pipe.close() }.isSuccess
+                closed
+            }
         }
     }
 }
