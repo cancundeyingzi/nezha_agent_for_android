@@ -2,6 +2,7 @@ package com.nezhahq.agent.service.keepalive
 
 import android.content.Context
 import com.nezhahq.agent.core.model.KeepAliveSettings
+import com.nezhahq.agent.service.reportLifecycleEvent
 import com.nezhahq.agent.util.Logger
 import java.util.concurrent.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -9,6 +10,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -104,13 +107,16 @@ internal class KeepAliveController(
             if (timeoutMillis == NO_TIMEOUT) {
                 action()
             } else if (withTimeoutOrNull(timeoutMillis) { action() } == null) {
-                Logger.e("KeepAliveController: $operation timed out after ${timeoutMillis}ms")
+                reportLifecycleEvent {
+                    Logger.e("KeepAliveController: $operation timed out after ${timeoutMillis}ms")
+                }
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Logger.e("KeepAliveController: $operation failed", e)
+            reportLifecycleEvent { Logger.e("KeepAliveController: $operation failed", e) }
         }
+        currentCoroutineContext().ensureActive()
     }
 
     companion object {

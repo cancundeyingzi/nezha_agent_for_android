@@ -2,11 +2,14 @@ package com.nezhahq.agent.service.keepalive
 
 import com.nezhahq.agent.SilentLoggerRule
 import com.nezhahq.agent.core.model.KeepAliveSettings
+import com.nezhahq.agent.util.Logger
+import com.nezhahq.agent.util.PlatformLogSink
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.CancellationException
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -14,9 +17,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -101,6 +106,103 @@ class KeepAliveControllerTest {
         assertEquals(1, overlay.closeCount)
         assertEquals(1, vpn.closeCount)
         assertEquals(1, wakeLock.closeCount)
+    }
+
+    @Test
+    fun failingPlatformLogsDoNotInterruptLaterResourcesAfterCloseErrors() = runBlocking {
+        val uncaught = mutableListOf<Throwable>()
+        val cleanupJob = SupervisorJob()
+        val cleanupScope = CoroutineScope(
+            coroutineContext + cleanupJob + CoroutineExceptionHandler { _, failure -> uncaught += failure }
+        )
+        val overlay = ThrowingResource(failClose = true)
+        val audio = ThrowingResource(failClose = true)
+        val vpn = ThrowingResource(failClose = true)
+        val wakeLock = RecordingResource()
+        val controller = KeepAliveController(audio, overlay, wakeLock, vpn, cleanupScope)
+        val previousSink = Logger.platformSink
+        val failingSink = FailingPlatformLogSink()
+        Logger.platformSink = failingSink
+
+        try {
+            assertTrue(withTimeout(2_000) { controller.closeWithin(1_000) })
+            withTimeout(2_000) { cleanupJob.join() }
+
+            assertEquals(1, overlay.closeCount)
+            assertEquals(1, audio.closeCount)
+            assertEquals(1, vpn.closeCount)
+            assertEquals(1, wakeLock.closeCount)
+            assertEquals(3, failingSink.errors.get())
+            assertTrue(uncaught.isEmpty())
+        } finally {
+            cleanupJob.cancelAndJoin()
+            Logger.platformSink = previousSink
+        }
+    }
+
+    @Test
+    fun failingPlatformLogsDoNotInterruptLaterResourcesAfterIndividualTimeouts() = runBlocking {
+        val uncaught = mutableListOf<Throwable>()
+        val cleanupJob = SupervisorJob()
+        val cleanupScope = CoroutineScope(
+            coroutineContext + cleanupJob + CoroutineExceptionHandler { _, failure -> uncaught += failure }
+        )
+        val overlay = SuspendingCloseResource()
+        val audio = SuspendingCloseResource()
+        val vpn = RecordingResource()
+        val wakeLock = RecordingResource()
+        val controller = KeepAliveController(audio, overlay, wakeLock, vpn, cleanupScope)
+        val previousSink = Logger.platformSink
+        val failingSink = FailingPlatformLogSink()
+        Logger.platformSink = failingSink
+
+        try {
+            assertTrue(withTimeout(2_000) { controller.closeWithin(1_000) })
+            withTimeout(2_000) { cleanupJob.join() }
+
+            assertTrue(overlay.closeStarted)
+            assertTrue(audio.closeStarted)
+            assertEquals(1, vpn.closeCount)
+            assertEquals(1, wakeLock.closeCount)
+            assertEquals(2, failingSink.errors.get())
+            assertTrue(uncaught.isEmpty())
+        } finally {
+            cleanupJob.cancelAndJoin()
+            Logger.platformSink = previousSink
+        }
+    }
+
+    @Test
+    fun failingPlatformLogCannotConsumeCancellationOfTheCleanupCaller() = runBlocking {
+        val uncaught = mutableListOf<Throwable>()
+        val cleanupJob = SupervisorJob()
+        val cleanupScope = CoroutineScope(
+            coroutineContext + cleanupJob + CoroutineExceptionHandler { _, failure -> uncaught += failure }
+        )
+        val overlay = ThrowingResource(failClose = true)
+        val audio = RecordingResource()
+        val vpn = RecordingResource()
+        val wakeLock = RecordingResource()
+        val controller = KeepAliveController(audio, overlay, wakeLock, vpn, cleanupScope)
+        val previousSink = Logger.platformSink
+        val failingSink = FailingPlatformLogSink(beforeError = { cleanupJob.cancel() })
+        Logger.platformSink = failingSink
+
+        try {
+            assertFalse(withTimeout(2_000) { controller.closeWithin(1_000) })
+            withTimeout(2_000) { cleanupJob.join() }
+
+            assertTrue(cleanupJob.isCancelled)
+            assertEquals(1, overlay.closeCount)
+            assertEquals(0, audio.closeCount)
+            assertEquals(0, vpn.closeCount)
+            assertEquals(0, wakeLock.closeCount)
+            assertEquals(1, failingSink.errors.get())
+            assertTrue(uncaught.isEmpty())
+        } finally {
+            cleanupJob.cancelAndJoin()
+            Logger.platformSink = previousSink
+        }
     }
 
     @Test
@@ -590,6 +692,20 @@ class KeepAliveControllerTest {
 
         vpn.setEnabled(true)
         assertEquals(2, host.startCount)
+    }
+
+    private class FailingPlatformLogSink(private val beforeError: () -> Unit = {}) : PlatformLogSink {
+        val errors = AtomicInteger()
+
+        override fun info(message: String) {
+            throw IllegalStateException("platform info sink failed")
+        }
+
+        override fun error(message: String, throwable: Throwable?) {
+            errors.incrementAndGet()
+            beforeError()
+            throw IllegalStateException("platform error sink failed")
+        }
     }
 
     private class RecordingResource : KeepAliveResource {
