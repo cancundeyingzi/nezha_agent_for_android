@@ -6,6 +6,7 @@ import com.nezhahq.agent.core.model.RemoteCapabilities
 import com.nezhahq.agent.core.task.RemoteCapabilityPolicy
 import com.nezhahq.agent.core.task.TaskTypes
 import com.nezhahq.agent.util.Logger
+import com.nezhahq.agent.util.awaitResultWithin
 import com.nezhahq.agent.util.readLimitedUtf8
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
@@ -325,7 +326,7 @@ object TaskExecutor {
                     val request = Request.Builder().url(url).build()
                     // 使用 .use {} 确保 Response 在异常时也能正确释放，
                     // 防止 OkHttp 连接池泄漏（原 response.close() 在异常路径下不会执行）
-                    monitoringClient.newCall(request).execute().use { response ->
+                    monitoringClient.newCall(request).awaitResultWithin(MONITORING_CALL_TIMEOUT_MS) { response ->
                         val delay = (System.currentTimeMillis() - start).toFloat()
 
                         // 提取 SSL 证书信息（仅 HTTPS 连接有 handshake）
@@ -584,9 +585,12 @@ object TaskExecutor {
 }
 
 /** Uses the platform trust store and OkHttp's default hostname verifier. */
-internal fun createMonitoringClient(): OkHttpClient = OkHttpClient.Builder()
+internal const val MONITORING_CALL_TIMEOUT_MS = 15_000L
+
+internal fun createMonitoringClient(callTimeoutMillis: Long = MONITORING_CALL_TIMEOUT_MS): OkHttpClient = OkHttpClient.Builder()
     .connectTimeout(10, TimeUnit.SECONDS)
     .readTimeout(10, TimeUnit.SECONDS)
+    .callTimeout(callTimeoutMillis, TimeUnit.MILLISECONDS)
     .build()
 
 /** Do not pass the exception to Logger: its message and causes can include commands or secrets. */

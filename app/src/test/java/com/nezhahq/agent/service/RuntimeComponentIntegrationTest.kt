@@ -37,6 +37,44 @@ import proto.Nezha.TaskResult
 class RuntimeComponentIntegrationTest {
     @get:Rule val logger = SilentLoggerRule()
 
+    @Test fun fullCommandQueueStillAllowsAllProbeFamiliesAndStopJoinsRunningCommands() = runBlocking {
+        val incoming = Channel<Task>(Channel.UNLIMITED)
+        val results = Channel<TaskResult>(Channel.UNLIMITED)
+        val started = Channel<Long>(Channel.UNLIMITED)
+        val stopped = mutableSetOf<Long>()
+        val components = Components(this,
+            shortTask = { task, _ ->
+                if (task.type == TaskTypes.COMMAND) {
+                    started.send(task.id)
+                    try { awaitCancellation() } finally { stopped += task.id }
+                }
+                successful(task)
+            }, tasks = { outgoing -> channelFlow {
+                val reader = launch { outgoing.collect { results.send(it) } }
+                try { for (item in incoming) send(item) } finally { reader.cancel() }
+            } })
+        val running = components.start(this)
+        try {
+            incoming.send(task(1, TaskTypes.COMMAND))
+            incoming.send(task(2, TaskTypes.COMMAND))
+            assertEquals(setOf(1L, 2L), withTimeout(5_000) { List(2) { started.receive() }.toSet() })
+            for (id in 3L..19L) incoming.send(task(id, TaskTypes.COMMAND))
+            incoming.send(task(20, TaskTypes.HTTP_GET))
+            incoming.send(task(21, TaskTypes.ICMP_PING))
+            incoming.send(task(22, TaskTypes.TCP_PING))
+            val received = withTimeout(5_000) { List(4) { results.receive() }.associateBy { it.id } }
+            assertEquals(setOf(19L, 20L, 21L, 22L), received.keys)
+            assertFalse(received.getValue(19).successful)
+            assertTrue(received.getValue(19).data.contains("command queue is full"))
+            assertTrue((20L..22L).all { received.getValue(it).successful })
+            assertTrue(started.tryReceive().isFailure)
+            assertTrue(stopped.isEmpty())
+            assertTrue(components.stateCount > 0)
+        } finally { withTimeout(5_000) { running.cancelAndJoin() } }
+        assertEquals(setOf(1L, 2L), stopped)
+        assertTrue(components.taskScopes.all(Job::isCompleted))
+    }
+
     @Test fun idleReplacementKeepsMetricsLegacySessionsAndWorkersButJoinsOldMcpAndReleasesItsBudgets() = runBlocking {
         val legacyStarted = CompletableDeferred<Unit>()
         val legacyStopped = CompletableDeferred<Unit>()
@@ -245,16 +283,18 @@ class RuntimeComponentIntegrationTest {
         val executionGrants = mutableListOf<RemoteCapabilities>()
         val components = Components(this,
             shortTask = { task, grant ->
-                if (task.type == TaskTypes.KEEPALIVE) {
+                if (task.id <= 2) {
                     blockersStarted.send(Unit)
                     releaseWorkers.await()
-                } else executionGrants += grant
+                    return@Components successful(task)
+                }
+                if (task.type == TaskTypes.COMMAND) executionGrants += grant
                 TaskExecutor.executeTask(task, grant)
             },
             tasks = { outgoing -> channelFlow {
                 val collector = launch { outgoing.collect { results.send(it) } }
                 try {
-                    repeat(8) { send(task(it + 1L, TaskTypes.KEEPALIVE)) }
+                    repeat(2) { send(task(it + 1L, TaskTypes.COMMAND)) }
                     send(task(9, TaskTypes.COMMAND))
                     // A following task cannot be received until routing command 9 has completed.
                     send(task(10, TaskTypes.KEEPALIVE))
@@ -265,7 +305,7 @@ class RuntimeComponentIntegrationTest {
         )
         val running = components.start(this)
         try {
-            withTimeout(10_000) { repeat(8) { blockersStarted.receive() }; commandQueued.await() }
+            withTimeout(10_000) { repeat(2) { blockersStarted.receive() }; commandQueued.await() }
             components.dispatcher.updateCapabilities(RemoteCapabilities())
             releaseWorkers.complete(Unit)
             val command = withTimeout(10_000) {
@@ -302,12 +342,13 @@ class RuntimeComponentIntegrationTest {
         val reporter = MetricReporter(runtimeScope,
             collectHost = { Host.getDefaultInstance() },
             collectState = { stateCount++; ticks.send(Unit); State.getDefaultInstance() },
-            fetchGeoIp = { null }, currentGeoIpReporter = { null }, stateReportIntervalMillis = 10)
+            fetchGeoIp = { proto.Nezha.GeoIP.getDefaultInstance() }, currentGeoIpReporter = { {} },
+            stateReportIntervalMillis = 10)
         val dispatcher = TaskDispatcher(ENABLED, { scope, capabilities ->
             McpSession(scope, capabilities, backend).also { registrations += it }
         }, shortTask, idleMillis)
         private val supervisor = ConnectionSupervisor(connection, { _, _ -> },
-            reportInitial = { reporter.reportInitial({}, {}) },
+            reportInitial = { reporter.reportInitial {} },
             reportState = { _, onReceipt ->
                 reporter.reportState({ states -> flow {
                     stateStarts++

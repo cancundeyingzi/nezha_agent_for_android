@@ -52,6 +52,11 @@
 -keep,allowobfuscation class com.nezhahq.agent.util.LegacyPlaintextConfiguration { public *; }
 -keep,allowobfuscation class com.nezhahq.agent.executor.FileManager { public *; }
 -keep,allowobfuscation class com.nezhahq.agent.util.ShellBackendPolicy { public *; }
+# Exact cross-APK ABI used by the file and runtime cancellation regressions.
+-keep,allowobfuscation class com.nezhahq.agent.util.IsolatedShellCommandKt { public *; }
+-keep,allowobfuscation class com.nezhahq.agent.util.ShellCommandResult { public *; }
+-keep,allowobfuscation interface com.nezhahq.agent.grpc.GrpcConnection { public *; }
+-keep,allowobfuscation enum com.nezhahq.agent.grpc.GrpcTransportMode { *; }
 
 -keep,allowobfuscation class com.nezhahq.agent.mcp.transport.ApplicationHelperLauncher { public *; }
 -keep,allowobfuscation class com.nezhahq.agent.mcp.transport.McpHelperTransport { public *; }

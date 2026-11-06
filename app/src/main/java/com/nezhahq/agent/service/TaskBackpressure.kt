@@ -18,7 +18,8 @@ internal enum class ShortTaskAdmission {
 internal suspend fun enqueueShortTaskWithBackpressure(
     task: Task,
     shortTaskQueue: SendChannel<Task>,
-    resultChannel: SendChannel<TaskResult>
+    resultChannel: SendChannel<TaskResult>,
+    queueName: String = "short-task"
 ): ShortTaskAdmission {
     val admission = shortTaskQueue.trySend(task)
     if (admission.isSuccess) return ShortTaskAdmission.ENQUEUED
@@ -27,7 +28,7 @@ internal suspend fun enqueueShortTaskWithBackpressure(
     resultChannel.send(
         buildFailedTaskResult(
             task,
-            "Task dropped: local short-task queue is full."
+            "Task dropped: local $queueName queue is full."
         )
     )
     return ShortTaskAdmission.REJECTED_QUEUE_FULL

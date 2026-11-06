@@ -3,6 +3,7 @@ package com.nezhahq.agent.executor
 import android.content.Context
 import com.nezhahq.agent.util.Logger
 import com.nezhahq.agent.util.RootShell
+import com.nezhahq.agent.util.ShellCommandResult
 import com.nezhahq.agent.util.shellEscape
 import com.google.protobuf.ByteString
 import kotlinx.coroutines.*
@@ -26,7 +27,10 @@ class FileManager internal constructor(
     private val context: Context,
     private val streamId: String,
     private val openIoStream: (Flow<Nezha.IOStreamData>) -> Flow<Nezha.IOStreamData>,
-    private val downloadSourceOverride: DownloadFileSource?
+    private val downloadSourceOverride: DownloadFileSource?,
+    private val privilegedAuthorized: () -> Boolean = RootShell::isAuthorized,
+    private val executePrivileged: suspend (String, Long) -> ShellCommandResult = RootShell::executeIsolatedResult,
+    private val copyFile: (File, File) -> Unit = { source, target -> source.copyTo(target, overwrite = true); Unit }
 ) {
     constructor(
         context: Context,
@@ -197,7 +201,7 @@ class FileManager internal constructor(
     private suspend fun listDir(requestedDir: String) {
         // 空路径处理（Dashboard 初次连接可能发送空字符串）
         var dir = requestedDir.ifBlank { DEFAULT_HOME }
-        val isRootMode = RootShell.isAuthorized()
+        val isRootMode = privilegedAuthorized()
 
         // ── 策略 1：Root/Shizuku 模式优先使用 ls 命令 ──────────────────────
         // 关键：Android 11+ FUSE 会过滤 File.listFiles()，导致只能看到文件夹，
@@ -217,7 +221,7 @@ class FileManager internal constructor(
         // ── 策略 2：Java IO（普通模式或 Root ls 失败时）───────────────────
         val javaFile = File(dir)
         val javaEntries = javaFile.listFiles()
-        if (javaEntries != null && javaEntries.isNotEmpty()) {
+        if (javaEntries != null) {
             val entries = javaEntries.map { file ->
                 // 使用 try-catch 保护 isDirectory 调用，
                 // 防止符号链接/FUSE 解析失败导致异常
@@ -235,7 +239,7 @@ class FileManager internal constructor(
         // [安全修复] 原实现在 rootMode=false 时仍会回退到 RootShell/su 提权，
         // 导致用户以为关闭了高权限模式，文件管理器仍可能获得高权限。
         if (!isRootMode) {
-            Logger.i("FileManager: Java IO 列目录失败或为空，未授权高权限回退")
+            Logger.i("FileManager: Java IO 列目录失败，未授权高权限回退")
         }
 
         // ── 最终兜底：回退到 DEFAULT_HOME ───────────────────────────────────
@@ -273,12 +277,10 @@ class FileManager internal constructor(
      * @return 文件条目列表，失败返回 null
      */
     private suspend fun listDirViaShell(dir: String): List<FileEntry>? {
-        val shellResult = withContext(Dispatchers.IO) {
-            RootShell.execute("ls -1Ap ${shellEscape(dir)}")
-        }
-        if (shellResult.isBlank()) return null
+        val shellResult = executePrivileged("ls -1Ap ${shellEscape(dir)}", 5_000)
+        if (!shellResult.successful) return null
 
-        val entries = shellResult.lines()
+        val entries = shellResult.output.lines()
             .filter { it.isNotBlank() }
             .map { line ->
                 if (line.endsWith("/")) {
@@ -287,7 +289,7 @@ class FileManager internal constructor(
                     FileEntry(line, isDir = false)
                 }
             }
-        return if (entries.isNotEmpty()) entries else null
+        return entries
     }
 
     private suspend fun download(filePath: String) {
@@ -402,13 +404,14 @@ class FileManager internal constructor(
                 session.close()
             }
             Logger.i("FileUpload: 缓存完成，正在保存")
-            if (moveFileToTarget(session.cacheFile, session.targetPath)) {
+            val saveFailure = moveFileToTarget(session.cacheFile, session.targetPath)
+            if (saveFailure == null) {
                 saved = true
                 sendData(COMPLETE_IDENTIFIER)
                 Logger.i("FileUpload: 文件上传完成")
             } else {
                 uploadState = UploadState.Aborted
-                sendError("文件保存失败，请检查目标类型、权限和剩余空间: ${session.targetPath}；请重新打开文件管理会话")
+                sendError("文件保存失败（$saveFailure），请检查目标类型、权限和剩余空间: ${session.targetPath}；请重新打开文件管理会话")
                 Logger.e("FileUpload: 无法保存到目标路径")
             }
         } finally {
@@ -424,18 +427,19 @@ class FileManager internal constructor(
         session?.abort()
     }
 
-    private suspend fun moveFileToTarget(sourceFile: File, targetPath: String): Boolean {
-        val isRootMode = RootShell.isAuthorized()
+    /** Null means all required save steps succeeded; otherwise returns a fixed diagnostic. */
+    private suspend fun moveFileToTarget(sourceFile: File, targetPath: String): String? {
+        val isRootMode = privilegedAuthorized()
 
         // 第一次尝试：Java API
         try {
             val target = File(targetPath)
-            if (target.isDirectory) return false
+            if (target.isDirectory) return "目标是目录"
             target.parentFile?.mkdirs()
             withContext(Dispatchers.IO) {
-                sourceFile.copyTo(target, overwrite = true)
+                copyFile(sourceFile, target)
             }
-            if (target.exists() && target.length() == sourceFile.length()) return true
+            if (target.exists() && target.length() == sourceFile.length()) return null
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {}
@@ -443,33 +447,34 @@ class FileManager internal constructor(
         // [安全修复] 仅在 rootMode=true 时才尝试 RootShell 提权写入
         if (!isRootMode) {
             Logger.i("FileManager: Java API 写入失败且 rootMode=false，不尝试提权兜底")
-            return false
+            return "普通写入失败且未授权高权限写入"
         }
 
         // 第二次尝试：RootShell（内部统一处理 su/Shizuku 回退和超时）
         try {
             val parentDir = File(targetPath).parent ?: ""
-            withContext(Dispatchers.IO) {
-                val command = buildList {
-                    if (parentDir.isNotEmpty()) add("mkdir -p ${shellEscape(parentDir)}")
-                    add("cp ${shellEscape(sourceFile.absolutePath)} ${shellEscape(targetPath)}")
-                    // Owner-only: the copy runs as root, and 666 would leave anything uploaded
-                    // into a private directory writable by every app on the device.
-                    add("chmod 600 ${shellEscape(targetPath)}")
-                }.joinToString(" && ")
-                // Isolated: copying a large file takes far longer than the dashboard's
-                // state-report timeout, and holding the shared shell that long stalls the metrics
-                // stream until the dashboard drops the connection carrying this very transfer.
-                RootShell.executeIsolated(command, timeoutMs = 120_000)
+            val command = buildList {
+                // Dedicated exit statuses identify the failed step without exposing raw shell output.
+                if (parentDir.isNotEmpty()) add("mkdir -p ${shellEscape(parentDir)} || exit 71")
+                add("cp ${shellEscape(sourceFile.absolutePath)} ${shellEscape(targetPath)} || exit 72")
+                add("chmod 600 ${shellEscape(targetPath)} || exit 73")
+            }.joinToString("\n")
+            val result = executePrivileged(command, 120_000)
+            if (!result.successful) return when {
+                result.timedOut -> "高权限保存超时"
+                result.exitCode == 71 -> "创建目标目录失败"
+                result.exitCode == 72 -> "复制文件失败"
+                result.exitCode == 73 -> "设置目标权限失败"
+                !result.outputComplete || result.truncated -> "高权限执行结果不完整"
+                else -> "高权限命令失败（退出码 ${result.exitCode ?: "未知"}）"
             }
-            if (withContext(Dispatchers.IO) { getFileSize(targetPath) } == sourceFile.length()) {
-                return true
-            }
+            return if (withContext(Dispatchers.IO) { getFileSize(targetPath) } == sourceFile.length()) null
+                else "目标文件长度校验失败"
         } catch (e: CancellationException) {
             throw e
-        } catch (_: Exception) {}
-
-        return false
+        } catch (_: Exception) {
+            return "高权限保存失败"
+        }
     }
 
     private suspend fun getFileSize(path: String): Long? {
@@ -477,10 +482,9 @@ class FileManager internal constructor(
         if (file.exists() && file.canRead()) {
             return file.length()
         }
-        val result = withContext(Dispatchers.IO) {
-            RootShell.execute("stat -c %s ${shellEscape(path)}")
-        }
-        return result.trim().toLongOrNull()
+        if (!privilegedAuthorized()) return null
+        val result = executePrivileged("stat -c %s ${shellEscape(path)}", 5_000)
+        return if (result.successful) result.output.trim().toLongOrNull() else null
     }
 
     /**

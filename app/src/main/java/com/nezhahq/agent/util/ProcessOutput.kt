@@ -14,11 +14,18 @@ private const val PROCESS_READ_BUFFER_BYTES = 8 * 1024
  * The buffer grows as output arrives rather than being sized to [maxBytes] up front: callers pass
  * caps in the megabytes, and most commands produce a few hundred bytes.
  */
-internal fun readLimitedUtf8(inputStream: InputStream, maxBytes: Int): String {
+internal fun readLimitedUtf8(inputStream: InputStream, maxBytes: Int): String =
+    readProcessOutput(inputStream, maxBytes).output
+
+internal data class ProcessOutput(val output: String, val truncated: Boolean, val complete: Boolean)
+
+internal fun readProcessOutput(inputStream: InputStream, maxBytes: Int): ProcessOutput {
     require(maxBytes >= 0) { "maxBytes must not be negative" }
 
     val retained = ByteArrayOutputStream(minOf(maxBytes, PROCESS_READ_BUFFER_BYTES))
     val readBuffer = ByteArray(PROCESS_READ_BUFFER_BYTES)
+    var truncated = false
+    var complete = true
     try {
         while (true) {
             val bytesRead = inputStream.read(readBuffer)
@@ -26,10 +33,12 @@ internal fun readLimitedUtf8(inputStream: InputStream, maxBytes: Int): String {
             if (bytesRead == 0) continue
 
             val bytesToRetain = minOf(bytesRead, maxBytes - retained.size())
+            if (bytesToRetain < bytesRead) truncated = true
             if (bytesToRetain > 0) retained.write(readBuffer, 0, bytesToRetain)
         }
     } catch (_: IOException) {
-        // Process termination closes the pipe; return the bytes retained before it closed.
+        // Preserve partial output, but structured callers must not confuse an IO failure with EOF.
+        complete = false
     }
-    return String(retained.toByteArray(), Charsets.UTF_8)
+    return ProcessOutput(String(retained.toByteArray(), Charsets.UTF_8), truncated, complete)
 }

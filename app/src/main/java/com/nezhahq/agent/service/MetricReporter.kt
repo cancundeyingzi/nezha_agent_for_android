@@ -32,27 +32,21 @@ internal class MetricReporter(
     private val currentGeoIpReporter: () -> (suspend (GeoIP) -> Unit)?,
     private val stateReportIntervalMillis: Long = DashboardSessionWatchdog.STATE_REPORT_INTERVAL_MS,
     private val stateReceiptTimeoutMillis: Long = DashboardSessionWatchdog.STATE_RECEIPT_TIMEOUT_MS,
-    private val handshakeTimeoutMillis: Long = DashboardSessionWatchdog.HANDSHAKE_TIMEOUT_MS
+    private val handshakeTimeoutMillis: Long = DashboardSessionWatchdog.HANDSHAKE_TIMEOUT_MS,
+    private val geoIpFetchTimeoutMillis: Long = 10_000,
+    private val geoIpRetryDelayMillis: Long = 30_000
 ) {
     private val geoIpReportJob = AtomicReference<Job?>(null)
 
     suspend fun reportInitial(
-        reportHost: suspend (Host) -> Unit,
-        reportGeoIp: suspend (GeoIP) -> Unit
+        reportHost: suspend (Host) -> Unit
     ) {
         val host = collectHost()
         DashboardSessionWatchdog.callWithin(handshakeTimeoutMillis, "ReportSystemInfo2") {
             reportHost(host)
         }
-        // GeoIP probing is part of the handshake budget, before either continuous stream starts.
-        val geoIp = DashboardSessionWatchdog.callWithin(handshakeTimeoutMillis, "FetchGeoIP") {
-            fetchGeoIp()
-        }
-        geoIp?.let {
-            DashboardSessionWatchdog.callWithin(handshakeTimeoutMillis, "ReportGeoIP") {
-                reportGeoIp(it)
-            }
-        }
+        // Optional metadata must never hold up the state/task streams or reset their connection.
+        requestGeoIpReport()
     }
 
     suspend fun reportState(
@@ -80,29 +74,38 @@ internal class MetricReporter(
 
     fun onNetworkAvailable() {
         Logger.i("Network dynamically available, polling full GeoIP metadata...")
+        requestGeoIpReport()
+    }
+
+    private fun requestGeoIpReport() {
         // Publish ownership before execution; every callback replaces and cancels the old probe.
-        val attempt = runtimeScope.launch(start = CoroutineStart.LAZY) { reportNetworkGeoIp() }
+        val attempt = runtimeScope.launch(start = CoroutineStart.LAZY) { reportGeoIp() }
         geoIpReportJob.getAndSet(attempt)?.cancel()
         attempt.invokeOnCompletion { geoIpReportJob.compareAndSet(attempt, null) }
         attempt.start()
     }
 
-    private suspend fun reportNetworkGeoIp() {
-        try {
-            val geoIp = DashboardSessionWatchdog.callWithin(handshakeTimeoutMillis, "NetworkCallback FetchGeoIP") {
-                fetchGeoIp()
-            }
-            // Resolve after the fetch, as a reconnect may have replaced the channel meanwhile.
-            val report = currentGeoIpReporter()
-            if (geoIp != null && report != null) {
-                DashboardSessionWatchdog.callWithin(handshakeTimeoutMillis, "NetworkCallback ReportGeoIP") {
-                    report(geoIp)
+    private suspend fun reportGeoIp() {
+        while (currentCoroutineContext().isActive) {
+            try {
+                // The collector bounds each address family separately inside this safety budget.
+                val geoIp = DashboardSessionWatchdog.callWithin(geoIpFetchTimeoutMillis, "FetchGeoIP") {
+                    fetchGeoIp()
                 }
+                // Resolve after fetching: a reconnect may have replaced the channel meanwhile.
+                val report = currentGeoIpReporter()
+                if (geoIp != null && report != null) {
+                    DashboardSessionWatchdog.callWithin(handshakeTimeoutMillis, "ReportGeoIP") {
+                        report(geoIp)
+                    }
+                    return
+                }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (exception: Exception) {
+                Logger.e("GeoIP 上报失败（稍后重试，不影响监控连接）", exception)
             }
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (exception: Exception) {
-            Logger.e("GeoIP 上报失败（将在下次连接成功后重试）", exception)
+            delay(geoIpRetryDelayMillis)
         }
     }
 }

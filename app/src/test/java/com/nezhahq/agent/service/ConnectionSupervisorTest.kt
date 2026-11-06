@@ -15,14 +15,62 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
 import proto.Nezha.TaskResult
+import proto.Nezha.GeoIP
+import proto.Nezha.Host
+import proto.Nezha.State
+import proto.Nezha.Receipt
 
 class ConnectionSupervisorTest {
     @get:Rule val logger = SilentLoggerRule()
+
+    @Test fun geoIpTimeoutAndFailuresNeverPreventOnlineOrRestartTheHealthyStreams() = runBlocking {
+        val parent = Job(coroutineContext[Job])
+        val scope = CoroutineScope(coroutineContext + parent)
+        val connection = RuntimeTestConnection().apply { connect() }
+        val online = CompletableDeferred<Unit>()
+        val tasksStarted = CompletableDeferred<Unit>()
+        val eventuallyReported = CompletableDeferred<Unit>()
+        var attempts = 0
+        var reports = 0
+        var stateStreams = 0
+        val reporter = MetricReporter(scope, { Host.getDefaultInstance() }, { State.getDefaultInstance() },
+            fetchGeoIp = {
+                when (++attempts) {
+                    1 -> awaitCancellation()
+                    2 -> throw IOException("synthetic GeoIP failure")
+                    else -> GeoIP.getDefaultInstance()
+                }
+            }, currentGeoIpReporter = {
+                {
+                    if (++reports == 1) throw IOException("synthetic metadata RPC failure")
+                    eventuallyReported.complete(Unit)
+                    Unit
+                }
+            }, stateReportIntervalMillis = 10, geoIpFetchTimeoutMillis = 100, geoIpRetryDelayMillis = 10)
+        val supervisor = ConnectionSupervisor(connection,
+            { state, _ -> if (state == GrpcConnectionState.CONNECTED) online.complete(Unit) },
+            reportInitial = { reporter.reportInitial {} },
+            reportState = { _, onReceipt ->
+                stateStreams++
+                reporter.reportState({ states -> flow { states.collect { emit(Receipt.getDefaultInstance()) } } }, onReceipt)
+            }, dispatchTasks = { tasksStarted.complete(Unit); awaitCancellation() })
+        scope.launch { supervisor.run() }
+        try {
+            withTimeout(5_000) { online.await(); tasksStarted.await(); eventuallyReported.await() }
+            assertEquals(4, attempts)
+            assertEquals(2, reports)
+            assertEquals(1, stateStreams)
+            assertEquals(1, connection.connects)
+            assertEquals(0, connection.disconnects)
+        } finally { withTimeout(5_000) { parent.cancelAndJoin() } }
+        assertTrue(parent.children.none())
+    }
 
     @Test fun onlyTheFirstReceiptInEachAttemptResetsBackoff() = runBlocking {
         val ceilings = mutableListOf<Long>()

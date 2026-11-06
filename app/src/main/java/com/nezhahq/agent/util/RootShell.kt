@@ -15,11 +15,7 @@ import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import rikka.shizuku.Shizuku
 import rikka.shizuku.ShizukuRemoteProcess
@@ -127,50 +123,27 @@ object RootShell {
      * transfer that was holding the shell. A 120-second upload copy made that a certainty, so slow
      * work gets its own process and the metrics loop keeps reporting throughout.
      *
-     * Returns the output, or an empty string if the shell could not start, the command failed, or
-     * it timed out — truncated output is never returned as if it were complete. Destroying the
-     * process is what ends a read that has hung: interrupting the thread does not reliably wake a
-     * blocked process stream, so both the timeout and cancellation of the caller route through it.
+     * Compatibility text interface for diagnostics. Callers deciding whether a filesystem mutation
+     * succeeded must use [executeIsolatedResult] and check its exit/output status.
      */
     suspend fun executeIsolated(
         command: String,
         timeoutMs: Long = DEFAULT_SHELL_TIMEOUT_MS
-    ): String = withContext(Dispatchers.IO) {
-        if (!accessController.isEnabled()) return@withContext ""
-        val managed = startManagedShell(workingDirectory = null) ?: return@withContext ""
-        val timedOut = AtomicBoolean(false)
+    ): String = executeIsolatedResult(command, timeoutMs).let {
+        if (!it.timedOut && it.outputComplete) it.output else ""
+    }
 
-        coroutineScope {
-            val destroyer = launch {
-                try {
-                    delay(timeoutMs)
-                    timedOut.set(true)
-                    Logger.e("RootShell: 隔离命令超时（${timeoutMs}ms），已终止其专用进程")
-                } finally {
-                    // Also reached when the caller is cancelled, which is what unblocks the read.
-                    // close(), not forceClose(): whichever of the two paths destroys the process
-                    // first is the one that must also drop it from the registry, and the loser
-                    // returns early.
-                    managed.close()
-                }
-            }
-
-            try {
-                managed.process.outputStream.apply {
-                    write("$command\nexit\n".toByteArray(Charsets.UTF_8))
-                    flush()
-                }
-                val output = readLimitedUtf8(managed.process.inputStream, MAX_SHELL_OUTPUT_BYTES)
-                if (timedOut.get()) "" else output
-            } catch (cancellation: CancellationException) {
-                throw cancellation
-            } catch (exception: Exception) {
-                Logger.e("RootShell: 隔离命令执行失败 (Error=${exception.javaClass.simpleName})")
-                ""
-            } finally {
-                destroyer.cancel()
-                managed.close()
-            }
+    internal suspend fun executeIsolatedResult(
+        command: String,
+        timeoutMs: Long = DEFAULT_SHELL_TIMEOUT_MS
+    ): ShellCommandResult = withContext(Dispatchers.IO) {
+        if (!accessController.isEnabled()) return@withContext ShellCommandResult()
+        val managed = startManagedShell(workingDirectory = null) ?: return@withContext ShellCommandResult()
+        try {
+            executeIsolatedShellCommand(managed.process, command, timeoutMs, managed::close)
+        } finally {
+            // Covers cancellation before the executor enters its IO context as well.
+            managed.close()
         }
     }
 

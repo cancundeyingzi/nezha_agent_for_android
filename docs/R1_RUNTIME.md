@@ -8,8 +8,8 @@ Runtime 现已安装 Task15 Exec、Task16 FsList、Task17 FsRead。Task12–14�
 | --- | --- |
 | `AgentRuntime` | 不可变配置快照、根 `SupervisorJob`、start/stop 状态、keepalive、helper owner、上传残留清理和 shutdown coordinator；负责装配平台采集器、gRPC 与执行器 |
 | `ConnectionSupervisor` | 完整连接尝试、状态发布、认证/TLS 错误识别及退避；仅本次尝试首次有效状态回执重置退避 |
-| `MetricReporter` | 初始主机/GeoIP 上报、状态流；网络回调借用根 scope，原子替换最新 GeoIP Job，旧 completion 只清自己的引用 |
-| `TaskDispatcher` | 唯一能力快照与当前 MCP 引用；外层 task scope、8 个短 worker、64 条短任务队列、legacy 结果通道、MCP 注册和路由 |
+| `MetricReporter` | 初始主机上报、状态流；GeoIP 借用根 scope 异步获取和补报，原子替换最新 Job，旧 completion 只清自己的引用 |
+| `TaskDispatcher` | 唯一能力快照与当前 MCP 引用；外层 task scope、8 个探测 worker/64 条队列、2 个传统命令 worker/16 条队列、legacy 结果通道、MCP 注册和路由 |
 | `StreamSessionManager` | 每个外层 task scope 一份，显式借用该 scope；传统 terminal/NAT/file 解析、配额、启动与 lease 释放，不自建后台 scope |
 
 ```mermaid
@@ -18,7 +18,7 @@ flowchart TD
     runtime --> connection[完整 connection attempt]
     connection --> metrics[状态上报流]
     connection --> tasks[外层 task scope]
-    tasks --> workers[短 workers / 队列 / legacy 结果]
+    tasks --> workers[探测与传统命令各自的 workers / 队列 / legacy 结果]
     tasks --> legacy[传统 terminal / NAT / file 会话]
     tasks --> producer[可替换 RequestTask producer]
     producer --> mcp[本次 MCP registration / 后端任务 / 结果预留]
@@ -26,7 +26,15 @@ flowchart TD
 
 传统流配额仍为总计 36，terminal 2、NAT 32、file 2，StreamID 不超过 256 UTF-8 字节，NAT Host 不超过 1024 字节。配额 acquire、会话 launch 和 completion 释放登记之间没有挂起点。取消到达时即使会话体未运行，也由 Job completion 归还 lease。
 
-握手每步 5 秒、状态回执 10 秒、状态上报间隔 2 秒；完整重连使用 5–30 秒上限的 full jitter 退避。TLS 错误继续使用 TLS 重试，不自动降级。网络回调与重连使用同一 Runtime 的连接对象，网络 GeoIP 获取结束后才解析当前可用 stub。
+主机信息握手 5 秒、状态回执 10 秒、状态上报间隔 2 秒；完整重连使用 5–30 秒上限的 full jitter 退避。TLS 错误继续使用 TLS 重试，不自动降级。
+
+GeoIP 是可失败的附加信息，主机信息上报完成后异步获取，不阻塞状态流和任务流，也不因查询或补报失败重建连接。IPv4/IPv6 各有 4 秒查询期限、60 秒缓存和连续失败 3 次后的 30 秒退避；成功结果立即按地址族保存，不被另一族的超时或调用取消丢弃。两族均不可用或补报失败时，根作用域内的任务等待 30 秒再试；网络回调或下次连接会替换该任务。获取结束后读取当前可用 stub，GeoIP RPC 仍有 5 秒期限，整个获取另有 10 秒兜底期限。停止 Runtime 会取消查询及重试等待。
+
+传统 Task4 命令最多同时执行 2 条，另有 16 条等待；HTTP/ICMP/TCP 等短任务保留 8 个 worker 和 64 条等待。两类队列独立准入，满载时返回明确失败；任务执行前再次检查当前授权，结果仍由原有有界通道传输。任务流空闲替换保留两组 worker，完整连接失败和 Runtime 停止则取消并等待两组任务。
+
+HTTP 探测使用可取消的 OkHttp 异步请求，协程取消会调用 `Call.cancel()`，响应在回调内消费并关闭。网络请求及外层协程均受 15 秒总期限约束，后者也覆盖 OkHttp 排队和平台 DNS 等待；到期返回任务失败，外部取消继续传播。连接/读取超时仍为 10 秒，证书链和主机名验证保持启用。
+
+传统文件管理的高权限保存通过独立 Shell 返回退出码、超时、输出完整性及截断状态。创建目录、复制、权限设置分别产生可辨识的失败状态，全部成功后才检查长度并发送完成标记。同长度旧文件不能代替命令成功。目录枚举以 Java 返回非 null 或 Shell 完整成功为准；成功的空列表保留请求路径。该接口继续使用已有授权及进程登记机制。
 
 ## MCP 与能力更新
 

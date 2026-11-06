@@ -38,6 +38,8 @@ API 23 的首次旋转回归发现 Shizuku 13.1.5 注销监听器使用 `java.ut
 | 通知权限 Host | 真实 Activity 重建及 Bundle 恢复后，等待中的请求不重复发起；新 Registry 按重建前的请求码返回实际发起 ID；重复结果不重复交付；旧意图停止并创建后继意图后，旧结果仍携旧 ID，后继请求随后独立发起 | `r1test` 专用、非导出的 Activity 运行生产 Host 叶子逻辑；可控 Registry 延迟结果，不请求系统权限弹窗；API 23、35 均验证 AndroidX 路由 |
 | 配置存储 | Android Keystore AES-GCM、Android DataStore 写入与关闭重开；旧明文和真实 EncryptedSharedPreferences 迁移；`.bak` 备份优先且旧加密源字节保持；密钥或目标丢失不自动重建；显式重置恢复 | 独立文件、SharedPreferences 名称和 Keystore alias，合成密钥内容 |
 | 上传 | 接收部分数据后取消，目标不被覆盖，临时文件和会话工作结束 | 真实应用沙箱文件，受控 IOStream |
+| 上传结果和空目录 | 真实 Shell 的成功、非零退出与超时；同长度只读旧文件导致实际 `cp` 失败时返回错误；Java 和 Shell 均返回原路径的空列表 | 测试注入普通 UID 的 `sh`，通过生产结构化执行器和 FileManager；不申请 Root/Shizuku 权限，不代替其授权链验收 |
+| HTTP 与可选 GeoIP | GeoIP 持续等待时 Runtime 仍获得状态回执并发起真实 HTTP 探测；响应头未返回时 `Runtime.stop()` 在 3 秒内完成，HTTP 对端关闭且 GeoIP 任务退出 | Dashboard 的 gRPC ClientCall 为受控响应，HTTP 使用真实回环 socket；平台采集和生产 Runtime/调度/执行/停止路径正常运行 |
 | 传统任务解析 | 默认 Android `JSONObject` 解析 terminal/NAT/file；非法 JSON、StreamID UTF-8 超长、非法/超长 NAT Host、重复 StreamID 和配额超限产生失败结果；取消后配额归零 | 合成任务，执行器仅登记并等待取消，不启动真实终端、不转发流量、不连接面板 |
 | MCP 普通权限 helper | 由生产 launcher 经 `app_process` 加载 R8 后的入口；命令、应用 UID、文件读往返及清理；HELLO 接纳前取消；真实 PID 从 `/proc` 消失，API 23 三根原始 FD 关闭；API 35 列举，API 23 明确拒绝不支持的有界列举 | 独立沙箱目录；测试返回未包装的原始 Process，不直接引用或反射 helper 入口类 |
 | 权限边界 | 注入 adapter 模拟 Root 开关撤销、Shizuku 即时拒绝/Binder 替换；已登记普通 UID 进程退出、旧许可失效且不回退 Root | **模拟授权边界**，不会申请 Root 或 Shizuku 权限 |

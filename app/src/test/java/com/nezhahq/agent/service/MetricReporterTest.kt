@@ -122,28 +122,43 @@ class MetricReporterTest {
         val order = mutableListOf<String>()
         val host = Host.newBuilder().setVersion("synthetic").build()
         val geoIp = GeoIP.newBuilder().setCountryCode("TEST").build()
+        val reported = CompletableDeferred<Unit>()
         val reporter = MetricReporter(this,
             collectHost = { order += "collect-host"; host },
             collectState = { error("not a state stream") },
-            fetchGeoIp = { order += "fetch-geoip"; geoIp }, currentGeoIpReporter = { null })
+            fetchGeoIp = { order += "fetch-geoip"; geoIp }, currentGeoIpReporter = {
+                { metadata -> assertEquals(geoIp, metadata); order += "report-geoip"; reported.complete(Unit); Unit }
+            })
         assertTrue(order.isEmpty())
         reporter.reportInitial(
-            reportHost = { assertEquals(host, it); order += "report-host" },
-            reportGeoIp = { assertEquals(geoIp, it); order += "report-geoip" })
+            reportHost = { assertEquals(host, it); order += "report-host" })
+        assertEquals(listOf("collect-host", "report-host"), order)
+        withTimeout(5_000) { reported.await() }
         assertEquals(listOf("collect-host", "report-host", "fetch-geoip", "report-geoip"), order)
     }
 
-    @Test fun anUnresponsiveInitialGeoIpFetchIsBoundedAndItsCancellationFinishesBeforeFailureReturns() = runBlocking {
+    @Test fun geoIpTimeoutRetriesInTheBackgroundAndRuntimeCancellationStopsTheRetry() = runBlocking {
         val fetchStopped = CompletableDeferred<Unit>()
+        val retried = CompletableDeferred<Unit>()
+        val parent = Job(coroutineContext[Job])
         var hosts = 0
-        var geoIpReports = 0
-        val reporter = MetricReporter(this, { Host.getDefaultInstance() }, { State.getDefaultInstance() },
-            fetchGeoIp = { try { awaitCancellation() } finally { fetchStopped.complete(Unit) } },
-            currentGeoIpReporter = { null }, handshakeTimeoutMillis = 100)
-        val failure = runCatching { reporter.reportInitial({ hosts++ }, { geoIpReports++ }) }.exceptionOrNull()
-        assertTrue(failure is DashboardSessionTimeoutException)
-        assertEquals(1, hosts)
-        assertEquals(0, geoIpReports)
-        assertTrue(fetchStopped.isCompleted)
+        var attempts = 0
+        val reporter = MetricReporter(CoroutineScope(coroutineContext + parent),
+            { Host.getDefaultInstance() }, { State.getDefaultInstance() },
+            fetchGeoIp = {
+                if (++attempts == 2) retried.complete(Unit)
+                try { awaitCancellation() } finally { fetchStopped.complete(Unit) }
+            }, currentGeoIpReporter = { error("failed probes must not resolve a reporter") },
+            geoIpFetchTimeoutMillis = 100, geoIpRetryDelayMillis = 10)
+        try {
+            withTimeout(5_000) { reporter.reportInitial { hosts++ } }
+            assertEquals(1, hosts)
+            assertFalse(fetchStopped.isCompleted)
+            withTimeout(5_000) { retried.await() }
+            assertTrue(fetchStopped.isCompleted)
+        } finally {
+            withTimeout(5_000) { parent.cancelAndJoin() }
+        }
+        assertTrue(parent.children.none())
     }
 }

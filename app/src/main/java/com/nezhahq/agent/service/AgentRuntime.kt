@@ -101,8 +101,7 @@ internal class AgentRuntime(
         statusSink = statusSink,
         reportInitial = { stub ->
             metricReporter.reportInitial(
-                reportHost = { stub.reportSystemInfo2(it) },
-                reportGeoIp = { stub.reportGeoIP(it) }
+                reportHost = { stub.reportSystemInfo2(it) }
             )
         },
         reportState = { stub, onReceipt -> metricReporter.reportState({ stub.reportSystemState(it) }, onReceipt) },

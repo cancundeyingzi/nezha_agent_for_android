@@ -48,10 +48,15 @@ internal class TaskDispatcher(
     ): Unit = coroutineScope {
         val results = Channel<TaskResult>(TASK_RESULT_BUFFER_CAPACITY)
         val shortTasks = Channel<Task>(SHORT_TASK_QUEUE_CAPACITY)
+        val commands = Channel<Task>(COMMAND_QUEUE_CAPACITY)
         val streamSessions = createStreamSessions(this, results)
         val workers = List(SHORT_TASK_WORKER_COUNT) {
             launch {
                 for (task in shortTasks) results.send(executeShortTask(task, capabilities.get()))
+            }
+        } + List(COMMAND_WORKER_COUNT) {
+            launch {
+                for (task in commands) results.send(executeShortTask(task, capabilities.get()))
             }
         }
         var registration: McpSession? = null
@@ -82,11 +87,12 @@ internal class TaskDispatcher(
                 },
                 onIdleRestart = { Logger.i("AgentRuntime: 任务流空闲，仅重建任务流") }
             ) { task ->
-                route(task, shortTasks, results, streamSessions, checkNotNull(registration))
+                route(task, shortTasks, commands, results, streamSessions, checkNotNull(registration))
             }
         } finally {
             workers.forEach(Job::cancel)
             shortTasks.close()
+            commands.close()
             results.close()
         }
     }
@@ -94,6 +100,7 @@ internal class TaskDispatcher(
     private suspend fun route(
         task: Task,
         shortTasks: SendChannel<Task>,
+        commands: SendChannel<Task>,
         results: SendChannel<TaskResult>,
         streamSessions: StreamSessionManager,
         mcp: McpSession
@@ -108,6 +115,8 @@ internal class TaskDispatcher(
         }
         if (task.type in TaskTypes.STREAM_TASKS) {
             streamSessions.launch(task)
+        } else if (task.type == TaskTypes.COMMAND) {
+            enqueueShortTaskWithBackpressure(task, commands, results, queueName = "command")
         } else {
             enqueueShortTaskWithBackpressure(task, shortTasks, results)
         }
@@ -116,6 +125,8 @@ internal class TaskDispatcher(
     private companion object {
         const val SHORT_TASK_WORKER_COUNT = 8
         const val SHORT_TASK_QUEUE_CAPACITY = 64
+        const val COMMAND_WORKER_COUNT = 2
+        const val COMMAND_QUEUE_CAPACITY = 16
         const val TASK_INPUT_BUFFER_CAPACITY = 0
         const val TASK_RESULT_BUFFER_CAPACITY = 8
     }
