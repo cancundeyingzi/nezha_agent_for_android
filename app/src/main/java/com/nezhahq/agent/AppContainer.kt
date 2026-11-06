@@ -6,6 +6,7 @@ import com.nezhahq.agent.core.config.StorageStatus
 import com.nezhahq.agent.grpc.ConnectionStateHolder
 import com.nezhahq.agent.service.AgentServiceRuntimeFactory
 import com.nezhahq.agent.service.AndroidAgentServiceRuntimeFactory
+import com.nezhahq.agent.simulator.SimulatorSessionStore
 import com.nezhahq.agent.util.ConfigurationReadiness
 import com.nezhahq.agent.util.Logger
 import com.nezhahq.agent.util.LocalDiagnostics
@@ -43,6 +44,9 @@ class AppContainer internal constructor(
 
     /** Written by the running service, observed by the UI. */
     val connectionState = ConnectionStateHolder()
+
+    /** Pending simulator cleanup survives replacement of the UI's ViewModel. */
+    internal val simulatorSessions = SimulatorSessionStore()
 
     /** Initializes encrypted storage and Root authorization off the main thread, then releases UI waiters. */
     fun initializeConfigurationStorage() {

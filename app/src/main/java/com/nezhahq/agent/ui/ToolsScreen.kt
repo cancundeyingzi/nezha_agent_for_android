@@ -31,14 +31,11 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nezhahq.agent.core.model.SimulatedDeviceConfig
+import com.nezhahq.agent.simulator.SimulatorPhase
 import com.nezhahq.agent.MainViewModel
 import com.nezhahq.agent.R
 import com.nezhahq.agent.util.PermissionChecker
 import com.nezhahq.agent.util.PermissionChecker.PermissionKey
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 // 工具页与配置页，以及它们共用的权限行和系统跳转工具。
 
@@ -48,38 +45,16 @@ fun ToolsScreenContent(
     contentPadding: PaddingValues = PaddingValues()
 ) {
     val context = LocalContext.current
-    val diagnosticState by vm.diagnosticState.collectAsState()
+    val state by vm.state.collectAsState()
+    val config = state.configuration
+    val diagnosticState = state.diagnostics.local
+    val simulatorSessionId = state.simulator.sessionId
     val scrollState = rememberScrollState()
-    // 权限刷新要读盘（getAllPermissionStatus 内部会读配置存储），必须在 IO 上执行，
-    // 故需要一个协程作用域给下面几处“事件驱动的刷新”使用。
-    val scope = rememberCoroutineScope()
-    var permissionList by remember { mutableStateOf<List<PermissionChecker.PermissionItem>>(emptyList()) }
-    var permissionsLoading by remember { mutableStateOf(true) }
-    var permissionError by remember { mutableStateOf<String?>(null) }
-    // Includes a configuration read: never call from composition or an activity callback directly.
-    val refreshPermissions: () -> Unit = {
-        scope.launch {
-            permissionsLoading = true
-            try {
-                permissionList = withContext(Dispatchers.IO) {
-                    PermissionChecker.getAllPermissionStatus(context)
-                }
-                permissionError = null
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Exception) {
-                permissionError = if (!vm.storageStatus.isUsable) {
-                    "配置存储不可用，请前往配置页重试读取"
-                } else {
-                    "权限状态读取失败，请重新进入此页面重试"
-                }
-            } finally {
-                permissionsLoading = false
-            }
-        }
-    }
-    // Retry/reset may recover storage while this page remains composed.
-    LaunchedEffect(vm.storageStatus, vm.isConfigLoading) { refreshPermissions() }
+    val permissionList = state.run.permissions
+    val permissionsLoading = state.run.permissionsLoading
+    val permissionError = state.run.permissionError
+    val refreshPermissions: () -> Unit = vm::refreshPermissions
+    LaunchedEffect(config.storageStatus, config.loading, config.autoStart.enabled) { refreshPermissions() }
 
     // ── 生命周期感知：从系统设置页返回时自动刷新权限状态 ──
     // 说明：此处仍用 androidx.compose.ui.platform.LocalLifecycleOwner。理应迁到
@@ -180,46 +155,46 @@ fun ToolsScreenContent(
             Spacer(modifier = Modifier.height(12.dp))
 
             EtherTextField(
-                value = vm.simulatorServer,
-                onValueChange = { vm.simulatorServer = it },
+                value = config.simulator.server,
+                onValueChange = vm::onSimulatorServerChanged,
                 label = "模拟器服务端 IP 或域名",
                 modifier = Modifier.fillMaxWidth(),
-                enabled = !vm.isConfigWriteInProgress && !vm.isConfigLoading && !vm.isResettingConfigStorage
+                enabled = config.canEditDraft
             )
             Spacer(modifier = Modifier.height(12.dp))
             EtherTextField(
-                value = vm.simulatorPort,
-                onValueChange = { vm.simulatorPort = it },
+                value = config.simulator.port,
+                onValueChange = vm::onSimulatorPortChanged,
                 label = "模拟器 gRPC 端口",
                 modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                enabled = !vm.isConfigWriteInProgress && !vm.isConfigLoading && !vm.isResettingConfigStorage
+                enabled = config.canEditDraft
             )
             Spacer(modifier = Modifier.height(12.dp))
             EtherTextField(
-                value = vm.simulatorSecret,
-                onValueChange = { vm.simulatorSecret = it },
+                value = config.simulator.secret,
+                onValueChange = vm::onSimulatorSecretChanged,
                 label = "模拟器客户端密钥 (Secret)",
                 modifier = Modifier.fillMaxWidth(),
-                enabled = !vm.isConfigWriteInProgress && !vm.isConfigLoading && !vm.isResettingConfigStorage
+                enabled = config.canEditDraft
             )
             Spacer(modifier = Modifier.height(12.dp))
             EtherTextField(
-                value = vm.simulatorThreadCount,
-                onValueChange = { vm.simulatorThreadCount = it },
+                value = config.simulator.threadCount,
+                onValueChange = vm::onSimulatorThreadCountChanged,
                 label = "模拟器并发线程数 (1-${SimulatedDeviceConfig.MAX_THREAD_COUNT})",
                 modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                enabled = !vm.isConfigWriteInProgress && !vm.isConfigLoading && !vm.isResettingConfigStorage
+                enabled = config.canEditDraft
             )
             Spacer(modifier = Modifier.height(8.dp))
             EtherToggleRow(
-                checked = vm.simulatorUseTls,
-                onCheckedChange = { vm.simulatorUseTls = it },
+                checked = config.simulator.useTls,
+                onCheckedChange = vm::onSimulatorUseTlsChanged,
                 title = "使用 TLS 加密连接",
                 description = "仅影响娱乐模拟设备，不会修改真实探针连接配置",
                 highlightWhenChecked = false,
-                enabled = !vm.isConfigWriteInProgress && !vm.isConfigLoading && !vm.isResettingConfigStorage
+                enabled = config.canEditDraft
             )
             Spacer(modifier = Modifier.height(8.dp))
             Column(
@@ -227,37 +202,36 @@ fun ToolsScreenContent(
                     .fillMaxWidth()
                     .clip(SmoothCornerShape(16.dp))
                     .background(
-                        if (vm.simulatorRunning) LgSuccess.copy(alpha = 0.08f)
+                        if (state.simulator.running) LgSuccess.copy(alpha = 0.08f)
                         else LgSurfaceContainerLow.copy(alpha = 0.7f)
                     )
                     .padding(horizontal = 12.dp, vertical = 10.dp)
             ) {
-                val displayedThreadCount = if (vm.simulatorRunning && vm.simulatorActiveThreadCount > 0) {
-                    vm.simulatorActiveThreadCount
+                val displayedThreadCount = if (!state.simulator.canStart && state.simulator.activeThreadCount > 0) {
+                    state.simulator.activeThreadCount
                 } else {
-                    vm.simulatorThreadCount
+                    config.simulator.threadCount
                         .trim()
                         .toIntOrNull()
                         ?.coerceIn(1, SimulatedDeviceConfig.MAX_THREAD_COUNT)
                         ?: SimulatedDeviceConfig.DEFAULT_THREAD_COUNT
                 }
+                val phaseLabel = when (state.simulator.phase) {
+                    SimulatorPhase.IDLE -> "未运行 · 配置并发"
+                    SimulatorPhase.STARTING -> "正在启动 · 配置并发"
+                    SimulatorPhase.RUNNING -> "运行中 · 并发"
+                    SimulatorPhase.STOPPING -> "正在停止 · 并发"
+                }
                 Text(
-                    text = if (vm.simulatorRunning) {
-                        "运行中 · 并发 $displayedThreadCount · " +
-                                "成功 ${vm.simulatorSuccessCount} 台 · " +
-                                "失败 ${vm.simulatorFailureCount} 台"
-                    } else {
-                        "未运行 · 配置并发 $displayedThreadCount · " +
-                                "成功 ${vm.simulatorSuccessCount} 台 · " +
-                                "失败 ${vm.simulatorFailureCount} 台"
-                    },
+                    text = "$phaseLabel $displayedThreadCount · " +
+                        "成功 ${state.simulator.successCount} 台 · 失败 ${state.simulator.failureCount} 台",
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
-                    color = if (vm.simulatorRunning) LgSuccess else LgOnSurfaceVariant
+                    color = if (state.simulator.running) LgSuccess else LgOnSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    text = vm.simulatorLastStatus,
+                    text = state.simulator.lastStatus,
                     style = MaterialTheme.typography.bodySmall,
                     color = LgOnSurfaceVariant
                 )
@@ -270,10 +244,10 @@ fun ToolsScreenContent(
                 GlassButtonPrimary(
                     onClick = { vm.startSimulator() },
                     modifier = Modifier.weight(1f),
-                    enabled = !vm.simulatorRunning && vm.canEditConfig
+                    enabled = state.simulator.canStart && config.canPersist
                 ) { Text("开启", fontWeight = FontWeight.Bold) }
                 GlassButtonSecondary(
-                    onClick = { vm.stopSimulator() },
+                    onClick = { vm.stopSimulator(simulatorSessionId) },
                     modifier = Modifier.weight(1f)
                 ) { Text("关闭", fontWeight = FontWeight.Bold) }
             }
@@ -300,7 +274,7 @@ fun ToolsScreenContent(
                 PermissionStatusRow(
                     item = item,
                     // 仅“应用内本地开关”（开机自启）受配置可写状态约束；其余跳系统页/弹授权的项不受限。
-                    actionEnabled = !item.key.isLocalToggle || vm.canEditConfig,
+                    actionEnabled = !item.key.isLocalToggle || config.canPersist,
                     onAction = {
                         // 根据权限类型执行不同的授权动作。
                         // when 对 PermissionKey 穷举、无 else：日后新增权限项若漏了分支会编译失败，
@@ -338,9 +312,7 @@ fun ToolsScreenContent(
                                 })
                             }
                             PermissionKey.AUTO_START -> {
-                                vm.toggleAutoStart(!item.granted) {
-                                    refreshPermissions()
-                                }
+                                vm.toggleAutoStart(!item.granted)
                             }
                             PermissionKey.STORAGE -> {
                                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -384,35 +356,35 @@ fun ToolsScreenContent(
 
             // 后台音频
             EtherToggleRow(
-                checked = vm.enableKeepAliveAudio,
+                checked = config.tools.audio,
                 onCheckedChange = vm::setKeepAliveAudio,
                 title = "允许后台播放微弱音频",
                 description = "发送极其微弱的次声波骗过部分系统的静音检测，防止杀后台（需重启服务生效）",
-                enabled = vm.canEditConfig
+                enabled = config.canPersist
             )
 
             // 悬浮窗
             EtherToggleRow(
-                checked = vm.enableFloatWindow,
+                checked = config.tools.overlay,
                 onCheckedChange = vm::setFloatWindow,
                 title = "开启像素级透明悬浮窗",
                 description = "创建一个1x1不可见的悬浮窗来拉高进程优先级（需授予悬浮窗权限并重启服务生效）",
-                enabled = vm.canEditConfig
+                enabled = config.canPersist
             )
 
             // 开机自启动
             EtherToggleRow(
-                checked = vm.enableAutoStart,
+                checked = config.autoStart.enabled,
                 onCheckedChange = { newValue ->
                     vm.toggleAutoStart(newValue)
                 },
                 title = "开机自启动",
                 description = "设备重启后自动恢复探针后台服务，建议开启以防失联",
-                enabled = vm.canEditConfig
+                enabled = config.canPersist
             )
         }
 
-        if (vm.isVpnTrafficCompatibilityAvailable) {
+        if (state.run.vpnCompatibilityAvailable) {
             // 复用外层已取得的 context，不再重复调用 LocalContext.current。
             val vpnAuthLauncher = rememberLauncherForActivityResult(
                 contract = ActivityResultContracts.StartActivityForResult()
@@ -430,8 +402,8 @@ fun ToolsScreenContent(
 
                 Row(verticalAlignment = Alignment.Top) {
                     EtherSwitch(
-                        checked = vm.enableVpnTraffic,
-                        enabled = vm.canEditConfig,
+                        checked = config.tools.vpn,
+                        enabled = config.canPersist,
                         onCheckedChange = { newValue ->
                             if (newValue) {
                                 val prepareIntent = VpnService.prepare(context)

@@ -6,8 +6,6 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.widget.Toast
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -44,32 +42,13 @@ fun ConfigScreenContent(
     val context = LocalContext.current
     val scrollState = rememberScrollState()
 
-    // ── gRPC 连接状态收集 ──
-    val grpcState by vm.grpcConnectionState.collectAsState()
-
-    // 首次配置从存储异步加载完成前为 true，完成后永久为 false（见 MainViewModel.isConfigLoading）。
-    // 加载期间禁止编辑连接字段与“启动探针”：否则用户可能在字段被填充前就点启动，拿到一份空配置。
-    val configLoading = vm.isConfigLoading
-    // 连接字段的可用性：既要没有写入进行中，也要首次加载已完成。
-    val fieldsEnabled = !vm.isConfigWriteInProgress && !configLoading && !vm.isRecoveringConfigStorage
+    val state by vm.state.collectAsState()
+    val config = state.configuration
+    val grpcState = state.grpcConnectionState
+    val configLoading = config.loading
+    val fieldsEnabled = config.canEditDraft
     var showResetConfirmation by remember { mutableStateOf(false) }
 
-    // ── 通知权限 Launcher（异步时序安全） ──
-    var pendingServiceLaunch by remember { mutableStateOf<(() -> Unit)?>(null) }
-
-    val notificationPermLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        if (!isGranted) {
-            Toast.makeText(
-                context,
-                "通知权限被拒绝！状态栏保活通知无法显示，系统可能降低探针保活优先级。",
-                Toast.LENGTH_LONG
-            ).show()
-        }
-        pendingServiceLaunch?.invoke()
-        pendingServiceLaunch = null
-    }
 
     Column(
         modifier = Modifier
@@ -118,7 +97,7 @@ fun ConfigScreenContent(
             }
         }
 
-        if (!configLoading && !vm.isConfigStorageAvailable) {
+        if (!configLoading && !config.storageAvailable) {
             EtherCard(
                 modifier = Modifier.border(
                     width = 2.dp,
@@ -133,7 +112,7 @@ fun ConfigScreenContent(
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    vm.storageErrorMessage
+                    config.storageError
                         ?: "加密配置无法读取。请先重试；只有确认重置才会清空配置，未完成的重置会继续执行。",
                     style = MaterialTheme.typography.bodyMedium,
                     color = LgError
@@ -142,17 +121,17 @@ fun ConfigScreenContent(
                 GlassButtonPrimary(
                     onClick = { vm.retryConfigurationStorage() },
                     modifier = Modifier.fillMaxWidth(),
-                    enabled = !vm.isRecoveringConfigStorage
+                    enabled = !config.recovering
                 ) {
-                    Text(if (vm.isRetryingConfigStorage) "正在重试…" else "重试读取", fontWeight = FontWeight.Bold)
+                    Text(if (config.retrying) "正在重试…" else "重试读取", fontWeight = FontWeight.Bold)
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 GlassButtonSecondary(
                     onClick = { showResetConfirmation = true },
                     modifier = Modifier.fillMaxWidth(),
-                    enabled = !vm.isRecoveringConfigStorage
+                    enabled = !config.recovering
                 ) {
-                    if (vm.isResettingConfigStorage) {
+                    if (config.resetting) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(16.dp),
                             strokeWidth = 2.dp,
@@ -165,7 +144,7 @@ fun ConfigScreenContent(
                     }
                 }
             }
-        } else if (vm.storageStatus == StorageStatus.LEGACY_UNREADABLE || vm.storageStatus == StorageStatus.CLEANUP_PENDING) {
+        } else if (config.storageStatus == StorageStatus.LEGACY_UNREADABLE || config.storageStatus == StorageStatus.CLEANUP_PENDING) {
             EtherCard(
                 modifier = Modifier.border(
                     width = 1.dp,
@@ -174,16 +153,16 @@ fun ConfigScreenContent(
                 )
             ) {
                 Text(
-                    if (vm.storageStatus == StorageStatus.CLEANUP_PENDING)
+                    if (config.storageStatus == StorageStatus.CLEANUP_PENDING)
                         "配置已加密保存，但旧明文配置尚未清理完成。请重试清理。"
                     else "当前配置已加密保存。另有旧加密配置无法读取，已保留原文件；请核对连接和模拟器设置。",
                     style = MaterialTheme.typography.bodyMedium,
                     color = LgWarning
                 )
-                if (vm.storageStatus == StorageStatus.CLEANUP_PENDING) {
+                if (config.storageStatus == StorageStatus.CLEANUP_PENDING) {
                     Spacer(modifier = Modifier.height(8.dp))
-                    GlassButtonSecondary(onClick = { vm.retryConfigurationStorage() }, enabled = !vm.isRecoveringConfigStorage) {
-                        Text(if (vm.isRetryingConfigStorage) "正在重试…" else "重试清理")
+                    GlassButtonSecondary(onClick = { vm.retryConfigurationStorage() }, enabled = !config.recovering) {
+                        Text(if (config.retrying) "正在重试…" else "重试清理")
                     }
                 }
             }
@@ -207,7 +186,7 @@ fun ConfigScreenContent(
         }
 
         // ── 首次启动自启动授权弹窗（保持功能不变）──
-        if (vm.showAutoStartPrompt) {
+        if (state.run.showAutoStartPrompt) {
             AlertDialog(
                 onDismissRequest = { /* 强迫用户做出选择，不响应点击外部取消 */ },
                 title = { Text("启用开机自启动？") },
@@ -254,9 +233,9 @@ fun ConfigScreenContent(
                 GlassButtonSecondary(
                     onClick = { vm.runInstantTest() },
                     modifier = Modifier.weight(1f),
-                    enabled = !vm.isTestRunning
+                    enabled = !state.diagnostics.sampling
                 ) {
-                    if (vm.isTestRunning) {
+                    if (state.diagnostics.sampling) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(16.dp),
                             strokeWidth = 2.dp,
@@ -282,17 +261,11 @@ fun ConfigScreenContent(
                             ) == PackageManager.PERMISSION_GRANTED
                         } else true
 
-                        vm.startAgent(
-                            notificationPermGranted = notifGranted,
-                            requestNotificationPerm = { doLaunch ->
-                                pendingServiceLaunch = doLaunch
-                                notificationPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                            }
-                        )
+                        vm.startAgent(notificationPermGranted = notifGranted)
                     },
                     modifier = Modifier.weight(1f),
                     // 加载未完成时禁止启动，避免用空配置启动探针。
-                    enabled = vm.canEditConfig && !configLoading
+                    enabled = config.canPersist && !state.run.savingStart && state.run.pendingStart == null
                 ) {
                     Text("启动探针", fontWeight = FontWeight.Bold)
                 }
@@ -318,38 +291,38 @@ fun ConfigScreenContent(
             Spacer(modifier = Modifier.height(12.dp))
 
             EtherTextField(
-                value = vm.server, onValueChange = { vm.server = it },
+                value = config.connection.server, onValueChange = vm::onServerChanged,
                 label = "服务端 IP 或域名", modifier = Modifier.fillMaxWidth(),
                 enabled = fieldsEnabled
             )
             Spacer(modifier = Modifier.height(12.dp))
             EtherTextField(
-                value = vm.port, onValueChange = { vm.port = it },
+                value = config.connection.port, onValueChange = vm::onPortChanged,
                 label = "gRPC 端口 (例如 8008)", modifier = Modifier.fillMaxWidth(),
                 enabled = fieldsEnabled
             )
             Spacer(modifier = Modifier.height(12.dp))
             EtherTextField(
-                value = vm.secret, onValueChange = { vm.secret = it },
+                value = config.connection.secret, onValueChange = vm::onSecretChanged,
                 label = "客户端密钥 (Secret)", modifier = Modifier.fillMaxWidth(),
                 enabled = fieldsEnabled
             )
             Spacer(modifier = Modifier.height(12.dp))
             EtherTextField(
-                value = vm.uuid, onValueChange = { vm.uuid = it },
+                value = config.connection.uuid, onValueChange = vm::onUuidChanged,
                 label = "客户端标识 (UUID)", modifier = Modifier.fillMaxWidth(),
                 enabled = fieldsEnabled
             )
             Spacer(modifier = Modifier.height(12.dp))
             EtherToggleRow(
-                checked = vm.useTls,
+                checked = config.connection.useTls,
                 onCheckedChange = { newValue -> vm.onUseTlsChanged(newValue) },
                 title = "使用 TLS 加密连接",
                 description = "关闭后将使用明文传输，仅适用于可信内网部署（需重启服务生效）",
                 highlightWhenChecked = false,
                 enabled = fieldsEnabled
             )
-            if (!vm.useTls) {
+            if (!config.connection.useTls) {
                 Text(
                     "⚠️ 明文模式将暴露密钥、UUID 和所有传输内容，仅在完全可信的内网中使用。",
                     style = MaterialTheme.typography.bodySmall,
@@ -365,7 +338,7 @@ fun ConfigScreenContent(
             Spacer(modifier = Modifier.height(8.dp))
             Row(verticalAlignment = Alignment.Top) {
                 EtherSwitch(
-                    checked = vm.rootMode,
+                    checked = config.connection.rootMode,
                     onCheckedChange = { newValue ->
                         vm.onRootModeChanged(newValue, shizukuRequestCode)
                     },
@@ -377,11 +350,11 @@ fun ConfigScreenContent(
                         "仅限高级设备.请确保你完全了解 Root / Shizuku 的使用...",
                         style = MaterialTheme.typography.bodySmall
                     )
-                    if (vm.shizukuStatusText.isNotEmpty()) {
+                    if (state.connectionSettings.shizukuStatus.isNotEmpty()) {
                         Text(
-                            vm.shizukuStatusText,
+                            state.connectionSettings.shizukuStatus,
                             style = MaterialTheme.typography.bodySmall,
-                            color = if (vm.shizukuStatusText.startsWith("✅"))
+                            color = if (state.connectionSettings.shizukuStatus.startsWith("✅"))
                                 LgSuccess else LgWarning
                         )
                     }
@@ -392,15 +365,15 @@ fun ConfigScreenContent(
 
             // 远程 Shell 权限与 rootMode 解耦，需用户显式开启。
             EtherToggleRow(
-                checked = vm.enableRemoteCommand,
+                checked = config.capabilities.shellEnabled,
                 onCheckedChange = { newValue ->
                     vm.toggleRemoteCommand(newValue)
                 },
                 title = "允许面板远程执行命令",
                 description = "允许命令、交互终端和 MCP Exec；关闭后拒绝新请求并取消活动 MCP 命令",
-                enabled = vm.canEditConfig
+                enabled = config.canPersist
             )
-            if (vm.enableRemoteCommand) {
+            if (config.capabilities.shellEnabled) {
                 Text(
                     "⚠️ 安全警告：开启后，面板可通过任务或交互终端执行任意 Shell 命令。" +
                             "请确保你完全信任面板管理员，否则可能带来数据泄露或设备损坏风险。",
@@ -413,15 +386,15 @@ fun ConfigScreenContent(
             Spacer(modifier = Modifier.height(12.dp))
 
             EtherToggleRow(
-                checked = vm.enableRemoteFileManager,
+                checked = config.capabilities.fileManagerEnabled,
                 onCheckedChange = { newValue ->
                     vm.toggleRemoteFileManager(newValue)
                 },
                 title = "允许面板远程管理文件",
                 description = "允许文件管理和 MCP 目录列表、文件读取；关闭后拒绝新请求并取消活动 MCP 文件任务",
-                enabled = vm.canEditConfig
+                enabled = config.canPersist
             )
-            if (vm.enableRemoteFileManager) {
+            if (config.capabilities.fileManagerEnabled) {
                 Text(
                     "⚠️ 安全警告：本应用持有「所有文件访问」权限，开启后面板可读写设备上几乎全部文件，" +
                             "包括照片、下载目录和其他应用的公共数据。",
@@ -434,15 +407,15 @@ fun ConfigScreenContent(
             Spacer(modifier = Modifier.height(12.dp))
 
             EtherToggleRow(
-                checked = vm.enableRemoteNat,
+                checked = config.capabilities.natEnabled,
                 onCheckedChange = { newValue ->
                     vm.toggleRemoteNat(newValue)
                 },
                 title = "允许面板内网穿透",
                 description = "允许 TaskType 9 通过本机转发 TCP 流量；关闭后新请求立即生效",
-                enabled = vm.canEditConfig
+                enabled = config.canPersist
             )
-            if (vm.enableRemoteNat) {
+            if (config.capabilities.natEnabled) {
                 Text(
                     "⚠️ 安全警告：开启后，面板可借本机访问其自身无法直达的地址，" +
                             "包括你所在的家庭或公司内网设备。",
@@ -454,7 +427,7 @@ fun ConfigScreenContent(
         }
 
         // ── 即时测试结果弹窗 ──
-        vm.instantTestResult?.let { result ->
+        state.diagnostics.result?.let { result ->
             AlertDialog(
                 onDismissRequest = { vm.dismissTestResult() },
                 confirmButton = {

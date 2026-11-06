@@ -58,6 +58,10 @@ class SimulatedDeviceLoop(
                 onSuccess()
             } catch (e: CancellationException) {
                 throw e
+            } catch (failure: SimulatorCleanupException) {
+                // A native connection still owned by this session is a terminal failure. Retrying
+                // here would create more channels while earlier workers have not exited.
+                throw failure
             } catch (t: Throwable) {
                 onFailure(t)
             }

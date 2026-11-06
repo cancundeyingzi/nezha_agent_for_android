@@ -65,7 +65,7 @@ class AndroidLifecycleRegressionTest {
             )
             assertEquals(PackageManager.PERMISSION_GRANTED, application.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS))
         }
-        compose.waitUntil(15_000) { !viewModel().isConfigLoading }
+        compose.waitUntil(15_000) { !viewModel().state.value.configuration.loading }
     }
 
     @After fun stopService() = stopAndAwaitResources()
@@ -152,14 +152,14 @@ class AndroidLifecycleRegressionTest {
         compose.waitForIdle()
         compose.onNodeWithContentDescription("工具").assertIsSelected()
         assertSame(retainedViewModel, viewModel())
-        assertEquals("rotation-fixture.invalid", viewModel().server)
-        assertEquals("rotation-synthetic-secret", viewModel().secret)
+        assertEquals("rotation-fixture.invalid", viewModel().state.value.configuration.connection.server)
+        assertEquals("rotation-synthetic-secret", viewModel().state.value.configuration.connection.secret)
 
         compose.activityRule.scenario.recreate()
         compose.waitForIdle()
         compose.onNodeWithContentDescription("工具").assertIsSelected()
-        assertEquals("rotation-fixture.invalid", viewModel().server)
-        assertEquals("rotation-synthetic-secret", viewModel().secret)
+        assertEquals("rotation-fixture.invalid", viewModel().state.value.configuration.connection.server)
+        assertEquals("rotation-synthetic-secret", viewModel().state.value.configuration.connection.secret)
     }
 
     @RequiresApi(33)

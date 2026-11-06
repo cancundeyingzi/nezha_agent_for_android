@@ -68,3 +68,16 @@
 -keep,allowobfuscation class com.nezhahq.agent.mcp.privileged.PrivilegedService { public *; }
 -keep,allowobfuscation class com.nezhahq.agent.mcp.privileged.PrivilegedHelperAuthority { public *; }
 -keep,allowobfuscation class com.nezhahq.agent.mcp.privileged.PrivilegedHelperAuthority$Permit { public *; }
+
+# Exact immutable state getters used by AndroidLifecycleRegressionTest.
+-keep,allowobfuscation class com.nezhahq.agent.ui.main.MainUiState {
+    public com.nezhahq.agent.ui.main.UiConfigurationState getConfiguration();
+}
+-keep,allowobfuscation class com.nezhahq.agent.ui.main.UiConfigurationState {
+    public boolean getLoading();
+    public com.nezhahq.agent.ui.main.ConnectionFields getConnection();
+}
+-keep,allowobfuscation class com.nezhahq.agent.ui.main.ConnectionFields {
+    public java.lang.String getServer();
+    public java.lang.String getSecret();
+}

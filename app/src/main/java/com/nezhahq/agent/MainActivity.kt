@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.zIndex
+import com.nezhahq.agent.ui.NotificationPermissionHost
 import com.nezhahq.agent.ui.UiEvent
 import com.nezhahq.agent.ui.ConfigScreenContent
 import com.nezhahq.agent.ui.LgBackground
@@ -150,6 +151,7 @@ class MainActivity : ComponentActivity() {
                 ) {
                     // 一次性事件在此消费；ViewModel 不再直接触碰 Android 的 Toast。
                     UiEventHost(viewModel)
+                    NotificationPermissionHost(viewModel)
 
                     MainScreen(
                         vm = viewModel,

@@ -10,7 +10,6 @@ import android.os.Process
 import android.provider.Settings
 import androidx.core.app.NotificationManagerCompat
 import com.nezhahq.agent.R
-import com.nezhahq.agent.appContainer
 import androidx.core.content.ContextCompat
 
 /**
@@ -68,12 +67,7 @@ object PermissionChecker {
      * @param context 应用上下文
      * @return 权限状态列表，顺序固定：短信 → 使用情况 → 无障碍 → 悬浮窗 → 电池优化 → 通知 → 开机自启
      */
-    fun getAllPermissionStatus(context: Context): List<PermissionItem> {
-        // The caller already runs on IO. Wait for authoritative startup state rather than caching
-        // a transient false while background Keystore initialization is still in progress.
-        check(context.appContainer.configRepository.initializeStorage().isUsable) {
-            "Configuration storage is unavailable"
-        }
+    fun getAllPermissionStatus(context: Context, autoStartEnabled: Boolean): List<PermissionItem> {
         return listOf(
             PermissionItem(
                 name = "短信读取权限",
@@ -111,7 +105,7 @@ object PermissionChecker {
             PermissionItem(
                 name = "开机自启动",
                 key = PermissionKey.AUTO_START,
-                granted = context.appContainer.configRepository.loadAutoStartState().enabled
+                granted = autoStartEnabled
             ),
             PermissionItem(
                 name = "所有文件访问",
