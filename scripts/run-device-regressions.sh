@@ -16,8 +16,11 @@ fi
 export ANDROID_SERIAL="$device_serial"
 device_adb() { adb -s "$device_serial" "$@"; }
 
-evidence=build/device-evidence
-mkdir -p "$evidence"
+evidence_root=build/device-evidence
+mkdir -p "$evidence_root"
+# Keep previous attempts intact without mixing their failure files with this run's metadata.
+evidence=$(mktemp -d "$evidence_root/run-XXXXXXXX")
+printf 'Device regression evidence: %s\n' "$evidence"
 # Only these disposable packages are touched. This also prevents a previous test's screenshot from
 # being mistaken for evidence from this run when a local emulator is deliberately reused.
 device_adb uninstall com.nezhahq.agent.r1test.test >/dev/null 2>&1 || true

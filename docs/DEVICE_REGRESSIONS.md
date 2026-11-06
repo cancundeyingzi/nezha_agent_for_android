@@ -19,6 +19,8 @@ JDK 17、Android SDK 35 下执行：
 
 CI 启用 AGP 的 `android.injected.androidTest.leaveApksInstalledAfterRun`，先取回应用专属外部目录的逐项失败证据，再卸载两个隔离测试包；API 23 不依赖 UTP 的 additionalTestOutput 支持。运行开始也仅卸载这两个包，避免旧截图混入，不清理其他应用或整台设备。
 
+宿主每次在 `build/device-evidence/run-<随机后缀>/` 建立独立目录，本轮 `run.txt`、取回的逐项失败文件、失败 logcat 和截图均写入该目录。已有运行目录完整保留，CI 继续归档整个 `build/device-evidence/`，避免复跑时把旧失败证据与新运行信息混装。
+
 脚本在任何卸载前要求只连接一台状态为 `device` 的 `emulator-*`，随后固定该 serial。连接真机、多个设备或离线设备时直接拒绝执行包修改。
 
 CI 产物名称为 `device-api-<API>-<commit>`；报告与 APK 必须来自同一产物。单独通过 JVM 测试、生成 APK 或存在旧报告，都不能作为本次设备回归通过的证据。本文件说明执行范围；具体通过状态以对应提交的本次仪器结果为准。
