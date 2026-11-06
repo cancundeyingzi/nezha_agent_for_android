@@ -8,7 +8,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.nezhahq.agent.R
@@ -28,6 +30,28 @@ import kotlinx.coroutines.cancel
  * Business work and resource ownership live in an [AgentRuntime] instance.
  */
 class AgentService : Service() {
+    private val notificationHandler = Handler(Looper.getMainLooper())
+    private val notificationSession = ServiceNotificationSession(
+        postToMain = { update ->
+            check(notificationHandler.post { update() }) { "The main looper rejected a notification update." }
+        },
+        publish = { statusText ->
+            getSystemService(NotificationManager::class.java)
+                ?.notify(NOTIFICATION_ID, createNotification(statusText))
+        },
+        stopForeground = {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+        },
+        cancelNotification = { getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_ID) },
+        onFailure = { operation, failure ->
+            Logger.e("AgentService: notification $operation failed", failure)
+        }
+    )
     private val commandJob = SupervisorJob()
     private val commandScope = CoroutineScope(
         Dispatchers.IO +
@@ -112,6 +136,9 @@ class AgentService : Service() {
      * instead of waiting for the shutdown it is itself part of.
      */
     override fun onDestroy() {
+        // Lifecycle callbacks and notification publication run on main. Fence this instance and
+        // remove its foreground notification before publishing stopped or starting async teardown.
+        notificationSession.close()
         AgentServiceRunningState.onDestroyed()
         val processor = commandProcessor
         val controller = runtimeController
@@ -167,14 +194,7 @@ class AgentService : Service() {
             .setSmallIcon(R.drawable.ic_notification)
             .build()
 
-    private fun updateNotification(statusText: String) {
-        try {
-            getSystemService(NotificationManager::class.java)
-                ?.notify(NOTIFICATION_ID, createNotification(statusText))
-        } catch (exception: Exception) {
-            Logger.e("AgentService: notification update failed", exception)
-        }
-    }
+    private fun updateNotification(statusText: String) = notificationSession.update(statusText)
 
     companion object {
         const val ACTION_START_OR_RELOAD =

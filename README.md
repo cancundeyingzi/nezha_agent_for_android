@@ -19,9 +19,10 @@ and virtualization type.
 | File browse, download, upload | 允许面板远程管理文件 | the app holds all-files access |
 | NAT / TCP forwarding | 允许面板内网穿透 | the device becomes a route into its network |
 
-All three default to off, and every task is checked twice — once when it is routed and once before
-it executes. Turning a switch off applies to new requests; sessions already established continue
-until the dashboard ends them.
+三个开关默认关闭。收到请求时检查对应能力，短任务执行前再次读取最新授权。
+关闭能力不会重连 gRPC：新传统终端、文件管理和 NAT 请求会被拒绝，已建立的传统长会话继续到
+面板结束或连接关闭；受影响的活动 MCP Exec/FsList/FsRead 后端会被取消并等待清理。
+重新开启能力不会复活已撤销的 MCP 任务。
 
 **Root and Shizuku** are separate from the switches above. They decide whether an already-permitted
 shell runs with elevation, not whether the dashboard may ask for one.
@@ -71,15 +72,29 @@ core/   Pure Kotlin. Configuration validation, remote-capability policy, the pri
         device. :app depends on :core, never the reverse.
 
 app/
-  service/    Android lifecycle. AgentService owns the foreground notification and hands the work
-              to a reloadable AgentRuntime; keepalive/ owns the wake lock, overlay, audio and
-              placeholder-VPN resources.
+  service/    AgentService/Controller 管理前台服务与 Runtime 替换；AgentRuntime 装配组件并拥有
+              根生命周期。ConnectionSupervisor、MetricReporter、TaskDispatcher、
+              StreamSessionManager 分别管理连接、上报、任务注册和传统流会话。
+              keepalive/ 拥有 wake lock、悬浮窗、音频和占位 VPN 资源。
   executor/   Task handlers — commands, terminal, file manager, NAT.
   collector/  Metric gathering, each with a non-privileged path and a privileged one.
   grpc/       Channel construction, authentication metadata, connection state.
   util/       RootShell and the shell protocol, configuration storage, logging.
-  ui/         Compose screens and the design system.
+  ui/         Compose screens and the design system; ui/main/ contains the feature controllers
+              and immutable UI state.
+  simulator/  模拟节点循环及由 AppContainer 持有的单个会话槽和原生连接清理状态。
 ```
+
+`MainViewModel` 只装配连接设置、运行控制、模拟器和诊断控制器，合并只读 `MainUiState`，并转发
+明确的 UI 事件。控制器共用一份 `UiConfigurationCoordinator`，由它拥有草稿、仓库读写、
+存储恢复和共享写入/解析门禁；保存失败不会继续启动服务或更新运行时权限。
+
+`AppContainer` 保有配置就绪状态、连接状态、本地诊断和 `SimulatorSessionStore`。模拟器在
+异步保存前先占用带代次的会话槽；停止请求先关闭准入，只有会话 Job 和全部原生连接都确认退出后
+才释放槽。清理失败或 ViewModel 销毁不会抹掉待清理的连接，新 ViewModel 也不能绕过该槽启动后继。
+此槽与真实 Service 的 `RuntimeShutdownGate` 分别管理各自资源。
+
+Runtime 的作用域层级、任务撤权和完整停止条件见 [运行时架构说明](docs/R1_RUNTIME.md)。
 
 ### Two shell channels
 
@@ -96,9 +111,14 @@ Android call that a test forgot to stub throws instead of quietly returning `0`/
 test whose code path logs needs `SilentLoggerRule`. There is no Robolectric and no mocking
 framework.
 
-Some behaviour cannot be reached from a JVM test — anything touching a real shell, a window, or a
-live dashboard. `DEVICE_VERIFICATION.md` lists what still needs a device and `VERIFICATION_GUIDE.md`
-explains how to check each item.
+Runtime 的组件装配回归直接检查空闲 producer 替换、MCP 请求/结果预算、传统会话与短 worker
+存活、权限刷新、真实流错误重连、GeoIP 取消竞态和首回执退避。JVM 用例替换平台解析/执行入口；
+Android 仪器用例另用真实 `JSONObject` 验证传统任务解析、错误结果和配额释放。
+
+[设备回归说明](docs/DEVICE_REGRESSIONS.md) 列出优化目标 APK 上的自动化范围及证据要求；
+真实 Dashboard、Root/Shizuku 管理器和厂商后台行为仍需对应环境验收。
+`DEVICE_VERIFICATION.md` 与 `VERIFICATION_GUIDE.md` 提供手工步骤。用例存在或旧报告通过不代表
+当前源码已经验证，本次状态应以同一提交的实际 JVM、构建和仪器结果为准。
 
 ## Security notes
 

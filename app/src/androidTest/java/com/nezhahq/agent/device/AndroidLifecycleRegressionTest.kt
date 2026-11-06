@@ -107,7 +107,7 @@ class AndroidLifecycleRegressionTest {
         assertEquals(fixture.registrations.get(), fixture.unregistrations.get())
         assertEquals(fixture.acceptedConnections.get(), fixture.closedConnections.get())
         assertEquals(GrpcConnectionState.IDLE, application.container.connectionState.connectionState.value)
-        awaitCondition("foreground notification removed") { !foregroundNotificationPresent() }
+        awaitAgentNotificationRemoval()
     }
 
     @Test fun finishingBackgroundActivityLeavesTheForegroundServiceRunningUntilExplicitStop() {
@@ -265,6 +265,17 @@ class AndroidLifecycleRegressionTest {
         application.getSystemService(NotificationManager::class.java).activeNotifications.any {
             it.id == 1001 && it.notification.flags and Notification.FLAG_FOREGROUND_SERVICE != 0
         }
+
+    private fun awaitAgentNotificationRemoval() {
+        val manager = application.getSystemService(NotificationManager::class.java)
+        try {
+            // An old status must not survive as an ordinary notification after foreground removal.
+            awaitCondition("foreground notification removed") { manager.activeNotifications.none { it.id == 1001 } }
+        } catch (failure: IllegalStateException) {
+            val remaining = manager.activeNotifications.joinToString { "id=${it.id}, flags=${it.notification.flags}" }
+            throw AssertionError("Service resources closed but notifications remain: [$remaining]", failure)
+        }
+    }
 
     private fun stopAndAwaitResources() {
         application.stopService(Intent(application, AgentService::class.java))
