@@ -9,6 +9,7 @@ import java.io.OutputStream
 import java.io.IOException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
@@ -361,6 +362,80 @@ class ApplicationHelperLeaseTest {
         }
         assertEquals(0, resources.retainedProcesses)
         ApplicationHelperLease.start(10213, FakeControl(), resources) { FakeProcess() }.closeAndAwait()
+    }
+
+    @Test fun failedExitOwnershipTransferRejectsHelloAndRetainsItsOriginalCleanupProof() {
+        for (failWithException in listOf(false, true)) {
+            val process = FakeProcess()
+            val nativeControl = FakeControl()
+            val proofObserved = CountDownLatch(1)
+            val releaseProof = AtomicBoolean(false)
+            val proof = object : ApplicationProcessExitProof {
+                override fun prepareForRequest(identity: ApplicationProcessIdentity): Boolean {
+                    assertEquals(123, identity.stat.pid)
+                    if (failWithException) throw IOException("transfer failed after mutation")
+                    return false
+                }
+                override fun destroyUnaccepted() { process.destroy() }
+                override fun confirmExited(): Boolean {
+                    process.exitValue()
+                    proofObserved.countDown()
+                    return releaseProof.get()
+                }
+            }
+            val control = object : ApplicationProcessControl by nativeControl {
+                override fun prepareExitProof(expectedUid: Int) = ApplicationProcessExitFactory {
+                    assertSame(process, it)
+                    proof
+                }
+            }
+            val lease = lease(process, control)
+            try {
+                assertThrows(HelperFailure::class.java) { lease.acceptIdentity(hello()) }
+                lease.close()
+                assertTrue(proofObserved.await(1, TimeUnit.SECONDS))
+                assertEquals(137, process.exitValue())
+                assertFalse(lease.cleanupComplete) // Java exit alone cannot replace a retained proof.
+                assertEquals(1, cleanup.retainedProcesses)
+                assertEquals(0, nativeControl.signals)
+                assertEquals(1, process.destroys)
+            } finally {
+                releaseProof.set(true)
+                lease.close()
+                retryRetained(cleanup)
+                lease.awaitCleanup()
+            }
+            process.assertPipesClosedOnce()
+        }
+    }
+
+    @Test fun cancellationBeforeHelloUsesTheCapturedExitOwnerForCleanup() {
+        val process = FakeProcess()
+        var destroys = 0
+        val proof = object : ApplicationProcessExitProof {
+            override fun prepareForRequest(identity: ApplicationProcessIdentity): Boolean = error("HELLO was not accepted")
+            override fun destroyUnaccepted() { destroys++; process.destroy() }
+            override fun confirmExited(): Boolean { process.exitValue(); return true }
+        }
+        val control = object : ApplicationProcessControl by FakeControl() {
+            override fun prepareExitProof(expectedUid: Int) = ApplicationProcessExitFactory { proof }
+        }
+        lease(process, control).closeAndAwait()
+        assertEquals(1, destroys)
+        assertEquals(0, cleanup.retainedProcesses)
+        process.assertPipesClosedOnce()
+    }
+
+    @Test fun exitOwnerPreflightFailureReleasesTheTicketWithoutLaunchingAChild() {
+        val starts = AtomicInteger()
+        val control = object : ApplicationProcessControl by FakeControl() {
+            override fun prepareExitProof(expectedUid: Int): ApplicationProcessExitFactory = throw IOException("unsupported ABI")
+        }
+        assertThrows(IOException::class.java) {
+            ApplicationHelperLease.start(10213, control, cleanup) { starts.incrementAndGet(); FakeProcess() }
+        }
+        assertEquals(0, starts.get())
+        assertEquals(0, cleanup.retainedProcesses)
     }
 
     private fun lease(process: Process, control: ApplicationProcessControl) =

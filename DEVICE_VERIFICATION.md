@@ -182,12 +182,12 @@
 
 ---
 
-## 未做的事
+## 自动化与剩余范围
 
-- **instrumented 测试**：`androidTest` 目录仍为空，相关依赖已一并移除，
-  待第一个真正的 UI 测试出现时再加回。
+- **instrumented 测试**：现有 `androidTest` 在 API 23/35 的非 debuggable R8 测试包上执行，
+  覆盖生命周期、真实 Keystore、迁移、上传取消和普通权限 helper；见
+  [设备回归范围与证据](docs/DEVICE_REGRESSIONS.md)。
 - **`DiskCollector` 之外的采集器**：仍与 Android 强耦合，其 Android 依赖是本质的
   （如 `GpuCollector` 全部依赖 `android.opengl.*`），未做接口化。
-- **`AgentRuntime` / `RootShell` / `MainViewModel` 的测试**：三者仍零覆盖。
-  `MainViewModel` 的剪贴板解析已抽成纯函数并补测，其余部分需先解开对
-  `Application`、静态单例的依赖。
+- **真实授权管理器与厂商后台策略**：模拟权限 adapter 不代表 SukiSU/Shizuku 管理器撤权；
+  仍需按设备回归文档保留真机手工验收。

@@ -4,6 +4,8 @@ import android.content.Context
 import com.nezhahq.agent.core.config.ConfigRepository
 import com.nezhahq.agent.core.config.StorageStatus
 import com.nezhahq.agent.grpc.ConnectionStateHolder
+import com.nezhahq.agent.service.AgentServiceRuntimeFactory
+import com.nezhahq.agent.service.AndroidAgentServiceRuntimeFactory
 import com.nezhahq.agent.util.ConfigurationReadiness
 import com.nezhahq.agent.util.Logger
 import com.nezhahq.agent.util.LocalDiagnostics
@@ -17,7 +19,17 @@ import java.io.File
  * view model, boot receiver), well below the point where an annotation processor earns its build
  * cost. Its providers map one-to-one onto `@Provides` should that change.
  */
-class AppContainer(context: Context) {
+class AppContainer internal constructor(
+    context: Context,
+    val configRepository: ConfigRepository,
+    internal val runtimeFactory: AgentServiceRuntimeFactory
+) {
+    constructor(context: Context) : this(
+        context,
+        DataStoreConfigRepository(context),
+        AndroidAgentServiceRuntimeFactory(context.applicationContext)
+    )
+
     private val appContext = context.applicationContext
 
     val localDiagnostics = LocalDiagnostics(directory = { File(appContext.noBackupFilesDir, "diagnostics") })
@@ -25,8 +37,6 @@ class AppContainer(context: Context) {
     init {
         Logger.diagnostics = localDiagnostics
     }
-
-    val configRepository: ConfigRepository = DataStoreConfigRepository(appContext)
 
     /** First-load UI barrier; later recovery publishes a fresh cached repository snapshot. */
     internal val configurationReadiness = ConfigurationReadiness()

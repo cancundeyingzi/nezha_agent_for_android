@@ -311,9 +311,9 @@ fun ConfigScreenContent(
             Text("连接设置", style = MaterialTheme.typography.titleMedium)
             Spacer(modifier = Modifier.height(6.dp))
             Text(
-                "连接信息按原版兼容方式明文保存在应用私有目录；Root 或同等高权限程序可以读取密钥。",
+                "连接配置已加密保存。",
                 style = MaterialTheme.typography.bodySmall,
-                color = LgWarning
+                color = LgOnSurfaceVariant
             )
             Spacer(modifier = Modifier.height(12.dp))
 

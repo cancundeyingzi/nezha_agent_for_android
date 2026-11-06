@@ -3,9 +3,9 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <!--
-        Shizuku API 13.1.5 声明 minSdkVersion=24，但其 API 仅在用户手动开启
-        Root/Shizuku 模式时才被调用（有运行时判断保护），强制覆盖不会导致崩溃。
-        Shizuku Provider 库本身已支持 minSdk=23。
+        Shizuku API 13.1.5 声明 minSdkVersion=24，其监听器注销使用 Predicate/removeIf。
+        app 模块启用 core library desugaring 补齐这些 Java 库 API，保留 minSdk 23；
+        Activity 的真实注册/注销由 API 23/35 仪器回归覆盖。Provider 本身支持 minSdk 23。
     -->
     <uses-sdk tools:overrideLibrary="rikka.shizuku.api" />
     <uses-feature

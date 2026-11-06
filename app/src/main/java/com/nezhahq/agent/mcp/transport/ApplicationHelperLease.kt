@@ -20,13 +20,15 @@ internal data class ApplicationProcessIdentity(val uid: Int, val stat: HelperSes
 internal interface ApplicationProcessControl {
     fun identity(pid: Int): ApplicationProcessIdentity?
     fun killGroup(pid: Int)
+    fun prepareExitProof(expectedUid: Int) = ApplicationProcessExitFactory(::javaProcessExitProof)
 }
 
 internal class ApplicationHelperLease private constructor(
     private val process: Process,
     override val expectedUid: Int,
     private val control: ApplicationProcessControl,
-    private val cleanupTicket: HelperProcessCleanup.Ticket
+    private val cleanupTicket: HelperProcessCleanup.Ticket,
+    private val exitProof: ApplicationProcessExitProof
 ) : HelperProcessLease {
     override val backend = HelperBackend.APPLICATION
     override val stdout get() = process.inputStream
@@ -48,6 +50,7 @@ internal class ApplicationHelperLease private constructor(
             // close may already have destroyed the pre-request helper while /proc was read.
             // No command is sent until acceptance returns, so a late registration must only fail.
             if (closed || identity != null) throw rejectedIdentity()
+            if (!runCatching { exitProof.prepareForRequest(observed) }.getOrDefault(false)) throw rejectedIdentity()
             identity = observed
         }
     }
@@ -77,8 +80,8 @@ internal class ApplicationHelperLease private constructor(
             // Process pipes may flush or wait for a concurrent REQUEST writer's monitor. Never
             // perform that work on the cancelled coroutine. The pre-launch ticket bounds native
             // resource bundles until their pipes close and the original Process proves exit.
-            scheduleCleanup(process, cleanupTicket) {
-                if (registered == null && running()) runCatching { process.destroy() }
+            scheduleCleanup(process, cleanupTicket, exitProof) {
+                if (registered == null) runCatching { exitProof.destroyUnaccepted() }
             }
         }
     }
@@ -107,19 +110,28 @@ internal class ApplicationHelperLease private constructor(
                 McpErrorCode.BUSY, "MCP helper process cleanup capacity is busy"
             ))
             var process: Process? = null
+            var exitProof: ApplicationProcessExitProof? = null
             try {
+                val exitFactory = control.prepareExitProof(expectedUid)
                 process = launch()
-                return ApplicationHelperLease(process, expectedUid, control, ticket)
+                exitProof = exitFactory.capture(process)
+                return ApplicationHelperLease(process, expectedUid, control, ticket, exitProof)
             } catch (failure: Throwable) {
                 val started = process
-                if (started == null) ticket.releaseUnused() else scheduleCleanup(started, ticket) {
-                    runCatching { started.destroy() }
+                if (started == null) ticket.releaseUnused() else {
+                    val retainedProof = exitProof ?: javaProcessExitProof(started)
+                    scheduleCleanup(started, ticket, retainedProof) {
+                        runCatching { retainedProof.destroyUnaccepted() }
+                    }
                 }
                 throw failure
             }
         }
 
-        private fun scheduleCleanup(process: Process, ticket: HelperProcessCleanup.Ticket, beforeClose: () -> Unit) {
+        private fun scheduleCleanup(
+            process: Process, ticket: HelperProcessCleanup.Ticket, exitProof: ApplicationProcessExitProof,
+            beforeClose: () -> Unit
+        ) {
             var closeCapturedPipes: (() -> Boolean)? = null
             ticket.scheduleUntil {
                 if (closeCapturedPipes == null) {
@@ -137,17 +149,16 @@ internal class ApplicationHelperLease private constructor(
                 val pipesClosed = closeCapturedPipes!!.invoke()
                 // Sending SIGKILL or control EOF is not proof of exit. exitValue is nonblocking
                 // on API 23 and stays bound to this Process even if its old numeric PID is reused.
-                val exited = awaitExit(process)
+                val exited = awaitExit(exitProof)
                 pipesClosed && exited
             }
         }
 
-        private fun awaitExit(process: Process): Boolean {
+        private fun awaitExit(exitProof: ApplicationProcessExitProof): Boolean {
             val until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CLEANUP_EXIT_WAIT_MS)
             while (!Thread.currentThread().isInterrupted) {
                 try {
-                    process.exitValue()
-                    return true
+                    if (exitProof.confirmExited()) return true
                 } catch (_: IllegalThreadStateException) {
                     // The native reaper may publish an otherwise completed kill shortly later.
                 } catch (_: Exception) {

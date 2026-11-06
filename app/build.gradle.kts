@@ -1,7 +1,22 @@
+import com.android.build.gradle.internal.tasks.L8DexDesugarLibTask
+import com.android.build.gradle.internal.tasks.R8Task
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.protobuf)
+}
+
+// AGP 8.6 normally traces each APK independently for L8. Instrumentation loads the test APK's j$
+// classes first, so a test-only backport can otherwise shadow an app backport with missing methods.
+// Trace the same union for BOTH r1test APKs; release retains its own normal shrinking inputs.
+tasks.withType<L8DexDesugarLibTask>().configureEach {
+    if (name == "l8DexDesugarLibR1test" || name == "l8DexDesugarLibR1testAndroidTest") {
+        dexFiles.from(
+            tasks.named<R8Task>("minifyR1testWithR8").flatMap { it.outputDex },
+            tasks.named<R8Task>("minifyR1testAndroidTestWithR8").flatMap { it.outputDex }
+        )
+    }
 }
 
 android {
@@ -14,6 +29,8 @@ android {
         targetSdk = 35
         versionCode = 386
         versionName = "A0.11.0-r1"
+        testInstrumentationRunner = "com.nezhahq.agent.device.DeviceTestRunner"
+        testInstrumentationRunnerArguments["timeout_msec"] = "60000"
         manifestPlaceholders["appLabel"] = "@string/app_name"
 
         vectorDrawables {
@@ -30,17 +47,21 @@ android {
             )
         }
         create("r1test") {
-            // Exercise the release R8 rules in a debuggable, separately installable package.
+            // A debug signature permits instrumentation; debuggable=false keeps R8 optimization on.
             initWith(getByName("release"))
             applicationIdSuffix = ".r1test"
             manifestPlaceholders["appLabel"] = "哪吒探针 R1测试"
             signingConfig = signingConfigs.getByName("debug")
-            isDebuggable = true
+            isDebuggable = false
             isMinifyEnabled = true
+            proguardFiles("proguard-r1test.pro")
             matchingFallbacks += listOf("debug")
         }
     }
+    testBuildType = "r1test"
     compileOptions {
+        // Shizuku listener removal uses Predicate/List.removeIf, which Android 6 does not provide.
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
@@ -72,6 +93,7 @@ dependencies {
 
     // Pure-Kotlin domain rules. The dependency is one-way: :core must never depend on :app.
     implementation(project(":core"))
+    coreLibraryDesugaring(libs.desugar.jdk.libs)
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
@@ -109,9 +131,15 @@ dependencies {
     compileOnly(libs.tomcat.annotations.api) // For javax.annotation.Generated
 
     testImplementation(libs.junit)
-    // No androidTest dependencies: there is no app/src/androidTest source set. Espresso and
-    // compose-ui-test were declared but never used, which made the project look like it had
-    // instrumented coverage. Add them back alongside the first test that needs them.
+    androidTestImplementation(libs.androidx.test.core.ktx)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.test.espresso.core)
+    // Runner 1.6.2 calls Trace.forceEnableAppTracing, absent from release's transitive 1.0.0.
+    // AGP aligns shared test dependencies to the tested variant, so align this variant explicitly.
+    add("r1testImplementation", libs.androidx.tracing)
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.tooling)
 }
 

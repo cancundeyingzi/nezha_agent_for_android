@@ -14,6 +14,7 @@ import android.graphics.Shader
 import android.os.Build
 import android.util.AttributeSet
 import android.view.View
+import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import androidx.annotation.RequiresApi
 import com.nezhahq.agent.ui.traceSmoothCorner
@@ -48,11 +49,22 @@ class NekogramLiquidGlassBarView @JvmOverloads constructor(
     private val selfLocation = IntArray(2)
 
     private var sourceView: View? = null
+    private var sourceObserver: ViewTreeObserver? = null
+    private var recordedOffsetX = Int.MIN_VALUE
+    private var recordedOffsetY = Int.MIN_VALUE
+    private var recordedSourceWidth = 0
+    private var recordedSourceHeight = 0
 
     private val sourcePreDrawListener = ViewTreeObserver.OnPreDrawListener {
-        postInvalidateOnAnimation()
+        val source = sourceView
+        // This observer belongs to the WINDOW, not just source. An unconditional next-frame
+        // invalidation here feeds the bar's own draw back into itself forever on an idle screen.
+        if (canRefreshFromSource() && source != null && source.width > 0 && source.height > 0 &&
+            (sourceContentIsDirty(source) || sourceGeometryChanged(source))) invalidate()
         true
     }
+    private val sourceScrollListener = ViewTreeObserver.OnScrollChangedListener { refreshFromSource() }
+    private val sourceLayoutListener = OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> refreshFromSource() }
 
     init {
         setWillNotDraw(false)
@@ -87,7 +99,7 @@ class NekogramLiquidGlassBarView @JvmOverloads constructor(
      *
      * The shader uniforms belong here rather than in [onDraw]: every one of them is derived from
      * the size or from a constant, so refreshing them per frame allocated a [RenderEffect] on each
-     * of the ~120 frames a second this view redraws at without ever changing what it drew. Any
+     * draw even when those values had not changed. Any
      * future uniform that varies independently of the size must re-run [LiquidGlassRuntimeEffect
      * .update] when it changes.
      */
@@ -121,6 +133,7 @@ class NekogramLiquidGlassBarView @JvmOverloads constructor(
         if (width <= 0 || height <= 0) {
             return
         }
+        recordSourceGeometry()
 
         canvas.save()
         // An empty path would clip the whole bar away; drawing unclipped is the better degradation.
@@ -159,12 +172,9 @@ class NekogramLiquidGlassBarView @JvmOverloads constructor(
         val source = sourceView
         val canvas = blurNode.beginRecording()
         if (source != null && source.width > 0 && source.height > 0) {
-            source.getLocationInWindow(sourceLocation)
-            getLocationInWindow(selfLocation)
             canvas.save()
             canvas.translate(
-                (sourceLocation[0] - selfLocation[0]).toFloat(),
-                (sourceLocation[1] - selfLocation[1]).toFloat()
+                recordedOffsetX.toFloat(), recordedOffsetY.toFloat()
             )
             source.draw(canvas)
             canvas.restore()
@@ -183,19 +193,56 @@ class NekogramLiquidGlassBarView @JvmOverloads constructor(
     }
 
     private fun attachSourceListener() {
+        detachSourceListener()
         val source = sourceView ?: return
         if (isAttachedToWindow && source.viewTreeObserver.isAlive) {
-            source.viewTreeObserver.removeOnPreDrawListener(sourcePreDrawListener)
-            source.viewTreeObserver.addOnPreDrawListener(sourcePreDrawListener)
+            sourceObserver = source.viewTreeObserver.also {
+                it.addOnPreDrawListener(sourcePreDrawListener)
+                it.addOnScrollChangedListener(sourceScrollListener)
+            }
+            source.addOnLayoutChangeListener(sourceLayoutListener)
         }
     }
 
     private fun detachSourceListener() {
-        val source = sourceView ?: return
-        if (source.viewTreeObserver.isAlive) {
-            source.viewTreeObserver.removeOnPreDrawListener(sourcePreDrawListener)
+        sourceObserver?.takeIf { it.isAlive }?.let {
+            it.removeOnPreDrawListener(sourcePreDrawListener)
+            it.removeOnScrollChangedListener(sourceScrollListener)
         }
+        sourceObserver = null
+        sourceView?.removeOnLayoutChangeListener(sourceLayoutListener)
     }
+
+    private fun sourceContentIsDirty(view: View): Boolean {
+        // Invisible children can retain dirty flags indefinitely without ever drawing.
+        if (view.visibility != VISIBLE) return false
+        if (view.isDirty) return true
+        if (view is ViewGroup) {
+            for (index in 0 until view.childCount) if (sourceContentIsDirty(view.getChildAt(index))) return true
+        }
+        return false
+    }
+
+    private fun sourceGeometryChanged(source: View): Boolean {
+        source.getLocationInWindow(sourceLocation)
+        getLocationInWindow(selfLocation)
+        return sourceLocation[0] - selfLocation[0] != recordedOffsetX ||
+            sourceLocation[1] - selfLocation[1] != recordedOffsetY ||
+            source.width != recordedSourceWidth || source.height != recordedSourceHeight
+    }
+
+    private fun recordSourceGeometry() {
+        val source = sourceView ?: return
+        source.getLocationInWindow(sourceLocation)
+        getLocationInWindow(selfLocation)
+        recordedOffsetX = sourceLocation[0] - selfLocation[0]
+        recordedOffsetY = sourceLocation[1] - selfLocation[1]
+        recordedSourceWidth = source.width
+        recordedSourceHeight = source.height
+    }
+
+    private fun canRefreshFromSource() = isShown && alpha > 0f && width > 0 && height > 0
+    private fun refreshFromSource() { if (canRefreshFromSource()) invalidate() }
 
     private fun dp(value: Float): Float = value * resources.displayMetrics.density
 }

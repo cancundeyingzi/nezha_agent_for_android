@@ -2,6 +2,7 @@ package com.nezhahq.agent.mcp.transport
 
 import android.content.Context
 import android.os.Process
+import android.os.Build
 import android.system.Os
 import android.system.OsConstants
 import com.nezhahq.agent.core.mcp.McpBusinessError
@@ -12,7 +13,8 @@ import java.io.FileInputStream
 /** One app_process per task, under the application UID. No shell, Service or retained process. */
 class ApplicationHelperLauncher internal constructor(
     context: Context,
-    private val owner: HelperLifecycleOwner?
+    private val owner: HelperLifecycleOwner?,
+    private val processStarter: (ProcessBuilder) -> java.lang.Process = ProcessBuilder::start
 ) : HelperLauncher {
     constructor(context: Context) : this(context, null)
 
@@ -36,7 +38,7 @@ class ApplicationHelperLauncher internal constructor(
                     clear()
                     putAll(HelperBootstrapEnvironment.create(apk, temporary.path, System.getenv()))
                 }
-                ApplicationHelperLease.start(uid, AndroidApplicationProcessControl, owner = owner) { builder.start() }
+                ApplicationHelperLease.start(uid, AndroidApplicationProcessControl, owner = owner) { processStarter(builder) }
             } catch (failure: HelperFailure) {
                 throw failure
             } catch (_: Exception) {
@@ -53,6 +55,10 @@ class ApplicationHelperLauncher internal constructor(
 }
 
 private object AndroidApplicationProcessControl : ApplicationProcessControl {
+    override fun prepareExitProof(expectedUid: Int): ApplicationProcessExitFactory =
+        if (Build.VERSION.SDK_INT == 23) Api23ChildReaper.prepare(expectedUid)
+        else ApplicationProcessExitFactory(::javaProcessExitProof)
+
     override fun identity(pid: Int): ApplicationProcessIdentity? {
         val path = "/proc/$pid"
         val stat = FileInputStream("$path/stat").use { HelperSessionIdentity.readSnapshot(it, pid) } ?: return null

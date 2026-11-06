@@ -12,7 +12,8 @@ object HelperSessionIdentity {
         val processGroupId: Int,
         val sessionId: Int,
         val startTimeTicks: Long,
-        val state: Char
+        val state: Char,
+        val parentPid: Int = 0
     ) {
         val ownsSession: Boolean get() = pid > 1 && processGroupId == pid && sessionId == pid
         val isLive: Boolean get() = state !in "ZXx"
@@ -46,10 +47,10 @@ object HelperSessionIdentity {
         val fields = stat.substring(end + 2).trim().split(Regex("\\s+"), limit = 21)
         if (fields.size < 20 || fields[0].length != 1 || fields[0][0] !in "RSDZTWXxKWPIt") return null
         fun number(index: Int): Int? = fields[index].takeIf { it.isNotEmpty() && it.all { digit -> digit in '0'..'9' } }?.toIntOrNull()
-        if (number(1) == null) return null
+        val parent = number(1) ?: return null
         val group = number(2) ?: return null
         val session = number(3) ?: return null
         val start = fields[19].takeIf { it.isNotEmpty() && it.all { digit -> digit in '0'..'9' } }?.toLongOrNull() ?: return null
-        return Snapshot(pid, group, session, start, fields[0][0])
+        return Snapshot(pid, group, session, start, fields[0][0], parent)
     }
 }

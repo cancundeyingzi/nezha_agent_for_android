@@ -13,7 +13,6 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.nezhahq.agent.R
 import com.nezhahq.agent.appContainer
-import com.nezhahq.agent.grpc.ManagedGrpcConnection
 import com.nezhahq.agent.mcp.transport.hasPendingHelperShutdown
 import com.nezhahq.agent.util.Logger
 import com.nezhahq.agent.util.RootShell
@@ -51,18 +50,7 @@ class AgentService : Service() {
         val connectionState = container.connectionState
         runtimeController = AgentRuntimeController(
             factory = AgentRuntimeFactory { config ->
-                AgentRuntime(
-                    context = applicationContext,
-                    config = config,
-                    statusSink = { state, message ->
-                        connectionState.updateState(state)
-                        updateNotification(message)
-                    },
-                    grpcConnection = ManagedGrpcConnection(
-                        config,
-                        connectionState::updateState
-                    )
-                )
+                container.runtimeFactory.create(config, connectionState, ::updateNotification)
             },
             applyPrivilegedAccess = RootShell::configureAuthorization,
             finalCleanup = RootShell::shutdown,

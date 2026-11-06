@@ -129,7 +129,8 @@ internal class AgentRuntime(
     private val networkRegistrar: RuntimeNetworkRegistrar =
         AndroidRuntimeNetworkRegistrar(context.applicationContext),
     keepAliveFactory: RuntimeKeepAliveFactory =
-        RuntimeKeepAliveFactory(KeepAliveController::create)
+        RuntimeKeepAliveFactory(KeepAliveController::create),
+    private val fetchGeoIp: suspend () -> proto.Nezha.GeoIP? = GeoIpCollector::fetchGeoIP
 ) : AgentRuntimeHandle {
     private val appContext = context.applicationContext
     private val lifecycleLock = Any()
@@ -285,7 +286,7 @@ internal class AgentRuntime(
                 DashboardSessionWatchdog.HANDSHAKE_TIMEOUT_MS,
                 "NetworkCallback FetchGeoIP"
             ) {
-                GeoIpCollector.fetchGeoIP()
+                fetchGeoIp()
             }
             val stub = grpcConnection.stub
             if (geoIp != null && stub != null) {
@@ -361,7 +362,7 @@ internal class AgentRuntime(
             DashboardSessionWatchdog.HANDSHAKE_TIMEOUT_MS,
             "FetchGeoIP"
         ) {
-            GeoIpCollector.fetchGeoIP()
+            fetchGeoIp()
         }
         geoIp?.let {
             DashboardSessionWatchdog.callWithin(

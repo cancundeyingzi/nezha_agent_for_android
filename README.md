@@ -26,6 +26,10 @@ until the dashboard ends them.
 **Root and Shizuku** are separate from the switches above. They decide whether an already-permitted
 shell runs with elevation, not whether the dashboard may ask for one.
 
+连接配置以密文保存在应用私有目录，密钥由 Android Keystore 管理。此保护针对静态存储；
+如果应用进程被控制，正在使用的配置仍可能被读取。读取密钥或密文失败时保留原文件，
+只有明确确认重置才清空配置；界面会显示需要重试或处理的存储问题。
+
 ## 电池指标
 
 温度栏同时上报 `Battery`（摄氏度）、`电池电量 (%)` 和电池侧充电/放电功率（瓦）。
@@ -53,8 +57,9 @@ Shizuku 正在等待授权时不触发 Root 请求。无 Shizuku 服务且存在
 ./gradlew :core:test :app:testDebugUnitTest   # the whole unit suite
 ```
 
-JDK 17, Android SDK 35, minSdk 23. There is no `androidTest` source set — everything is a JVM unit
-test.
+JDK 17, Android SDK 35, minSdk 23. Device regressions run against the non-debuggable, R8-optimized
+`r1test` APK on API 23 and 35: `./gradlew :app:connectedR1testAndroidTest`.
+See [device coverage and remaining manual checks](docs/DEVICE_REGRESSIONS.md).
 
 ## Layout
 
