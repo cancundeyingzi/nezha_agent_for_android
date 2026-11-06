@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Controlled ActivityResult restoration fixture; absent from the release source set. -->
+        <activity
+            android:name="com.nezhahq.agent.device.NotificationPermissionTestActivity"
+            android:exported="false"
+            android:theme="@style/Theme.NezhaAgent" />
+    </application>
+</manifest>

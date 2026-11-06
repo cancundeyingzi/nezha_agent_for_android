@@ -20,20 +20,19 @@ import java.util.concurrent.TimeUnit
 class RunControlControllerTest {
     @get:Rule val silentLogger = SilentLoggerRule()
 
-    @Test fun notificationWaitSurvivesPresenterReplacementAndResultStartsAtMostOnce() = runBlocking {
+    @Test fun notificationIntentWaitsForItsMatchingResultAndStartsAtMostOnce() = runBlocking {
         val configuration = readyConfiguration()
         val platform = ControllerPlatform()
         val run = RunControlController(configuration, platform, UiEvents(), this)
         run.start(false)
         configuration.awaitIdle()
         val launchedRequestId = requireNotNull(run.state.value.pendingStart).requestId
-        // The recreated presenter restores the ID it actually launched, while the retained
-        // controller owns the launch intent and saved configuration version.
-        val restoredRequestId = launchedRequestId
-        assertEquals(restoredRequestId, run.state.value.pendingStart?.requestId)
+        // This tests controller intent ownership. Actual host/registry saved-state restoration is
+        // exercised by NotificationPermissionHostRegressionTest on Android.
+        assertEquals(launchedRequestId, run.state.value.pendingStart?.requestId)
         assertEquals(0, platform.starts)
-        run.notificationPermissionResult(restoredRequestId, true)
-        run.notificationPermissionResult(restoredRequestId, true)
+        run.notificationPermissionResult(launchedRequestId, true)
+        run.notificationPermissionResult(launchedRequestId, true)
         assertEquals(1, platform.starts)
         assertNull(run.state.value.pendingStart)
     }

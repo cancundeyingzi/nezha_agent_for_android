@@ -81,3 +81,15 @@
     public java.lang.String getServer();
     public java.lang.String getSecret();
 }
+
+# Only the controlled r1test Activity's cross-APK test methods; release has no such Activity.
+-keep,allowobfuscation class com.nezhahq.agent.device.NotificationPermissionTestActivity {
+    public <init>();
+    public void setPendingRequest(java.lang.Long);
+    public int launchCount();
+    public int launchedRequestCode(int);
+    public long[] deliveredRequestIds();
+    public boolean[] deliveredGrants();
+    public androidx.activity.result.ActivityResultRegistry registryInstanceForTest();
+    public boolean dispatchPermissionResult(int, boolean);
+}

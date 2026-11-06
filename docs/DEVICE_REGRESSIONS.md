@@ -35,12 +35,15 @@ API 23 的首次旋转回归发现 Shizuku 13.1.5 注销监听器使用 `java.ut
 | --- | --- | --- |
 | Service | 真实前台服务启动、停止、同进程重建；运行时不重叠；gRPC TCP 连接释放；网络回调注册、触发和注销；通知及运行状态 | 合成配置，gRPC 仅连接 `127.0.0.1`；GeoIP 获取返回固定空结果 |
 | Activity | 旋转/重建保留草稿与选中页；API 35 静态界面停止重绘、滚动时真实玻璃 View 刷新；退到后台并结束 Activity 后 Service 继续运行 | 真实 MainActivity，测试应用容器 |
+| 通知权限 Host | 真实 Activity 重建及 Bundle 恢复后，等待中的请求不重复发起；新 Registry 按重建前的请求码返回实际发起 ID；重复结果不重复交付；旧意图停止并创建后继意图后，旧结果仍携旧 ID，后继请求随后独立发起 | `r1test` 专用、非导出的 Activity 运行生产 Host 叶子逻辑；可控 Registry 延迟结果，不请求系统权限弹窗；API 23、35 均验证 AndroidX 路由 |
 | 配置存储 | Android Keystore AES-GCM、Android DataStore 写入与关闭重开；旧明文和真实 EncryptedSharedPreferences 迁移；`.bak` 备份优先且旧加密源字节保持；密钥或目标丢失不自动重建；显式重置恢复 | 独立文件、SharedPreferences 名称和 Keystore alias，合成密钥内容 |
 | 上传 | 接收部分数据后取消，目标不被覆盖，临时文件和会话工作结束 | 真实应用沙箱文件，受控 IOStream |
 | MCP 普通权限 helper | 由生产 launcher 经 `app_process` 加载 R8 后的入口；命令、应用 UID、文件读往返及清理；HELLO 接纳前取消；真实 PID 从 `/proc` 消失，API 23 三根原始 FD 关闭；API 35 列举，API 23 明确拒绝不支持的有界列举 | 独立沙箱目录；测试返回未包装的原始 Process，不直接引用或反射 helper 入口类 |
 | 权限边界 | 注入 adapter 模拟 Root 开关撤销、Shizuku 即时拒绝/Binder 替换；已登记普通 UID 进程退出、旧许可失效且不回退 Root | **模拟授权边界**，不会申请 Root 或 Shizuku 权限 |
 
 网络回调使用 Android 的真实 `ConnectivityManager`，仅替换 GeoIP 的外部请求函数。gRPC fixture 接收实际 TCP/HTTP2 数据；停止后的 EOF 与资源计数共同确认释放。测试不连接真实面板或节点。取消与状态转换使用有界条件等待，失败会报告未达到的条件。
+
+`NotificationPermissionHostRegressionTest` 使用 `ActivityScenario.recreate()` 创建新的 Activity 和 `ActivityResultRegistry`，通过真实 `onSaveInstanceState`/`onCreate` 的 Bundle 保存与恢复 Host 的 `rememberSaveable` 状态、launcher key 和 Registry 映射。受控 `onLaunch` 仅记录请求码，随后通过真实 `RequestPermission.parseResult` 分发合成结果。首次恢复后的请求码必须能路由；重复分发可以由 Registry 拒绝，但不能再次交付已消费的请求。该范围不覆盖系统权限弹窗、实际授权变化或厂商权限界面；测试不会撤销现有通知权限。宿主只在 `src/r1test` 中声明，正式 release 不包含该 Activity。
 
 API 23 的旧 Java ProcessManager 只等待原进程组，已隔离 helper 留在登记表中还会触发 ECHILD 忙循环。适配在启动前核对固定 libcore 结构，启动后记录原始 Process/弱引用与 UID/PPID/startTime；确认同一子进程已拥有独立会话后，在登记锁内清除原弱引用并移除该登记，将回收权转交给原 proof。已隔离的启动结果立即转交，其他结果须在接受 HELLO 前完成；HELLO 前取消也由同一 proof 清理。原生非阻塞 waitpid 成功后仅向原 Process 发布退出值，发布重试不会再次等待数字 PID。僵尸状态、ECHILD、身份变化和转交失败均不能释放票据；普通进程仍由系统回收。API 24+ 保持 Java Process 回收路径；厂商若改变 API 23 的私有结构，启动会明确拒绝，不猜测其他私有入口。
 

@@ -18,6 +18,14 @@ import com.nezhahq.agent.MainViewModel
 @Composable
 internal fun NotificationPermissionHost(vm: MainViewModel) {
     val state by vm.state.collectAsState()
+    NotificationPermissionRequestHost(state.run.pendingStart?.requestId, vm::onNotificationPermissionResult)
+}
+
+@Composable
+internal fun NotificationPermissionRequestHost(
+    pendingNotificationId: Long?,
+    onResult: (requestId: Long, granted: Boolean) -> Unit
+) {
     // Persist the ID actually submitted to ActivityResultRegistry. A later pending intent must
     // never borrow an earlier request's callback, including across Activity recreation.
     var launchedNotificationRequestId by rememberSaveable { mutableStateOf<Long?>(null) }
@@ -29,10 +37,9 @@ internal fun NotificationPermissionHost(vm: MainViewModel) {
         launchedNotificationRequestId = null
         if (requestId != null) {
             completedNotificationRequestId = requestId
-            vm.onNotificationPermissionResult(requestId, granted)
+            onResult(requestId, granted)
         }
     }
-    val pendingNotificationId = state.run.pendingStart?.requestId
     LaunchedEffect(pendingNotificationId, launchedNotificationRequestId) {
         if (pendingNotificationId != null && launchedNotificationRequestId == null &&
             completedNotificationRequestId != pendingNotificationId) {
