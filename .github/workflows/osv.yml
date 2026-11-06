@@ -1,0 +1,72 @@
+name: dependency security
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  osv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      OSV_VERSION: 2.7.0
+      # Verified against the official v2.7.0 release asset digest.
+      OSV_SHA256: 160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Record source and workflow metadata
+        run: python3 scripts/write-ci-metadata.py build/reports/security/run.json
+
+      - name: Download and verify OSV-Scanner
+        shell: bash
+        run: |
+          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
+            "https://github.com/google/osv-scanner/releases/download/v${OSV_VERSION}/osv-scanner_linux_amd64" \
+            --output "${RUNNER_TEMP}/osv-scanner" 2>&1 | tee build/reports/security/download.log
+          printf '%s  %s\n' "$OSV_SHA256" "${RUNNER_TEMP}/osv-scanner" \
+            | sha256sum --check | tee build/reports/security/digest-check.log
+          chmod +x "${RUNNER_TEMP}/osv-scanner"
+          "${RUNNER_TEMP}/osv-scanner" --version | tee build/reports/security/scanner-version.txt
+
+      - name: Scan the committed Gradle locks
+        shell: bash
+        run: |
+          scan_exit_code=0
+          "${RUNNER_TEMP}/osv-scanner" scan source \
+            --lockfile=app/gradle.lockfile \
+            --lockfile=core/gradle.lockfile \
+            --all-packages --format=json \
+            --output-file=build/reports/security/osv-results.json \
+            > build/reports/security/osv-scan.log 2>&1 || scan_exit_code=$?
+          cat build/reports/security/osv-scan.log
+          printf '%s\n' "$scan_exit_code" > build/reports/security/exit-code.txt
+          if [ ! -s build/reports/security/osv-results.json ]; then
+            echo '::error::OSV-Scanner produced no results. The scan did not complete.'
+            exit 2
+          fi
+          exit "$scan_exit_code"
+
+      - name: Archive security results and scanned inputs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: osv-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/reports/security/
+            app/gradle.lockfile
+            core/gradle.lockfile
+            gradle/libs.versions.toml
+          if-no-files-found: error
+          retention-days: 14

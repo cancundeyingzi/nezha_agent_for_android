@@ -1,0 +1,24 @@
+version: 2
+
+# GitHub reads this file from the default branch (currently main). Android code is on master;
+# adding the file only to master does not enable updates. See docs/SUPPLY_CHAIN.md for installation.
+updates:
+  - package-ecosystem: gradle
+    directory: /
+    target-branch: master
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: master
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5

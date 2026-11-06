@@ -60,6 +60,8 @@ Shizuku 正在等待授权时不触发 Root 请求。无 Shizuku 服务且存在
 JDK 17, Android SDK 35, minSdk 23. Device regressions run against the non-debuggable, R8-optimized
 `r1test` APK on API 23 and 35: `./gradlew :app:connectedR1testAndroidTest`.
 See [device coverage and remaining manual checks](docs/DEVICE_REGRESSIONS.md).
+Dependency lock maintenance, OSV scans, CI artifacts and Dependabot installation are documented in
+[the supply chain guide](docs/SUPPLY_CHAIN.md).
 
 ## Layout
 
@@ -100,8 +102,9 @@ explains how to check each item.
 
 ## Security notes
 
-- Connection settings, including the client secret, are stored **in plaintext** in the app's
-  private directory. Root on the device can read them.
+- Connection settings, including the client secret, are stored in AES-GCM-encrypted DataStore files
+  in the app's private directory. The encryption key is managed by Android Keystore. Legacy
+  plaintext and EncryptedSharedPreferences stores are read only for verified migration.
 - The accessibility service exists for keep-alive, and also provides the screenshot capability
   behind the remote-command switch. Its description says so, because that description is what the
   user reads when granting it.

@@ -89,11 +89,24 @@ android {
     }
 }
 
+// AGP 8.6's Unified Test Platform runs on the host JVM and brings its own dependency graph.
+// Patch only that graph; these constraints must not enter an APK or change the AGP/Kotlin plugins.
+val utpSecurityConstraints by configurations.creating {
+    isCanBeResolved = false
+    isCanBeConsumed = false
+    description = "Security fixes for AGP's host Unified Test Platform dependencies"
+}
+configurations.matching { it.name.startsWith("_internal-unified-test-platform-") }.configureEach {
+    extendsFrom(utpSecurityConstraints)
+}
+
 dependencies {
 
     // Pure-Kotlin domain rules. The dependency is one-way: :core must never depend on :app.
     implementation(project(":core"))
     coreLibraryDesugaring(libs.desugar.jdk.libs)
+    // The official BOM keeps Netty's 4.1 modules aligned and tcnative on its separate 2.x version.
+    add(utpSecurityConstraints.name, platform(libs.netty.bom))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
@@ -122,6 +135,20 @@ dependencies {
     implementation(libs.grpc.stub)
     implementation(libs.grpc.kotlin.stub)
     implementation(libs.protobuf.javalite)
+    constraints {
+        implementation(libs.guava) {
+            because("Fix CVE-2026-102554 in gRPC's transitive Guava dependency")
+        }
+        add(utpSecurityConstraints.name, libs.utp.guava.get()) {
+            because("Fix CVE-2026-102554 in the host UTP graph")
+        }
+        add(utpSecurityConstraints.name, libs.protobuf.java.get()) {
+            because("Fix CVE-2024-7254 without changing the UTP protocol or AGP version")
+        }
+        add(utpSecurityConstraints.name, libs.commons.io.get()) {
+            because("Fix CVE-2024-47554 in host UTP retention/emulator-control dependencies")
+        }
+    }
 
     // Shizuku API：提供 ADB 级别的高权限 Shell 执行能力，
     // 当设备无 Root 但安装了 Shizuku 应用时，可作为 su 的替代方案。
@@ -140,6 +167,8 @@ dependencies {
     add("r1testImplementation", libs.androidx.tracing)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+    // Kotlin's debug-only metadata configuration does not inherit the main implementation BOM.
+    debugImplementation(platform(libs.androidx.compose.bom))
     debugImplementation(libs.androidx.compose.ui.tooling)
 }
 

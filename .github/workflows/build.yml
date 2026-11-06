@@ -21,6 +21,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Record source and workflow metadata
+        run: python3 scripts/write-ci-metadata.py build/ci-evidence/run.json
 
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
@@ -28,6 +33,9 @@ jobs:
           java-version: '17'
 
       - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+
+      - name: Verify committed dependency locks
+        run: ./gradlew :app:verifyDependencyLocks :core:verifyDependencyLocks --stacktrace
 
       - name: Unit tests
         run: ./gradlew :core:test :app:testDebugUnitTest
@@ -39,25 +47,30 @@ jobs:
       - name: Release and R1 test builds
         run: ./gradlew :app:assembleRelease :app:assembleR1test
 
-      - name: Upload R1 test APK
+      - name: Archive reports, APKs, mappings and source metadata
+        if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: nezha-agent-r1test-${{ github.sha }}
-          path: app/build/outputs/apk/r1test/app-r1test.apk
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Upload test reports
-        if: failure()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: test-reports-${{ github.sha }}
+          name: build-evidence-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            build/ci-evidence/
             app/build/reports/tests/
             core/build/reports/tests/
+            app/build/test-results/
+            core/build/test-results/
             app/build/reports/lint-results-release.html
             app/build/reports/lint-results-release.xml
-          retention-days: 7
+            app/build/reports/dependency-locks/
+            core/build/reports/dependency-locks/
+            app/build/outputs/apk/release/
+            app/build/outputs/apk/r1test/
+            app/build/outputs/mapping/release/
+            app/build/outputs/mapping/r1test/
+            app/gradle.lockfile
+            core/gradle.lockfile
+            gradle/libs.versions.toml
+          if-no-files-found: error
+          retention-days: 14
 
   device:
     needs: test
@@ -73,6 +86,12 @@ jobs:
             target: google_apis
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Record source and workflow metadata
+        env:
+          CI_MATRIX: api-${{ matrix.api }}-${{ matrix.target }}-x86_64
+        run: python3 scripts/write-ci-metadata.py build/ci-evidence/run.json
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
@@ -98,11 +117,15 @@ jobs:
         with:
           name: device-api-${{ matrix.api }}-${{ github.sha }}
           path: |
+            build/ci-evidence/
             app/build/outputs/apk/r1test/
             app/build/outputs/apk/androidTest/r1test/
             app/build/outputs/mapping/r1test/
             app/build/outputs/androidTest-results/
             app/build/reports/androidTests/
             build/device-evidence/
+            app/gradle.lockfile
+            core/gradle.lockfile
+            gradle/libs.versions.toml
           if-no-files-found: error
           retention-days: 14

@@ -1,12 +1,9 @@
 # Single source of truth for dependency and plugin versions.
 #
-# This file was introduced purely to gather the literals that were spread across the three build
-# scripts (junit alone was declared twice, at different call sites but the same version). Every
-# version below is the one the build already resolved to — nothing was upgraded while moving it
-# here, so a `dependencies` diff between this commit and its parent should be empty.
-#
-# Upgrading AGP/Kotlin/Compose is deliberately a separate change: it alters generated code and
-# lint output, and reviewing that alongside a mechanical move would hide one in the other.
+# Update dependency versions here, regenerate app/core dependency locks, and review the resolved
+# graph and OSV report together. See docs/SUPPLY_CHAIN.md for the commands and CI evidence.
+# AGP/Kotlin/Compose upgrades require a separate compatibility review because they change generated
+# code, shrinking and lint output; a library security fix must not silently upgrade the toolchain.
 
 [versions]
 agp = "8.6.0"
@@ -21,8 +18,8 @@ composeBom = "2024.02.00"
 androidxCore = "1.12.0"
 androidxLifecycle = "2.7.0"
 androidxActivity = "1.8.2"
-# Alpha on purpose: it is the last published security-crypto line, and it is used read-only to
-# import the legacy EncryptedSharedPreferences store.
+# Pinned for read-only import of the legacy EncryptedSharedPreferences store; new writes use
+# Keystore-backed DataStore. This is a migration compatibility choice, not a claim of latest status.
 androidxSecurityCrypto = "1.1.0-alpha06"
 androidxDataStore = "1.1.7"
 
@@ -30,7 +27,12 @@ gson = "2.10.1"
 okhttp = "4.12.0"
 grpc = "1.62.2"
 grpcKotlin = "1.4.1"
-protobuf = "3.25.3"
+protobuf = "3.25.9"
+guava = "33.7.2-android"
+# Host-only UTP fixes. Keep these out of APK configurations; see app's utpSecurityConstraints.
+guavaJvm = "33.7.2-jre"
+netty = "4.1.137.Final"
+commonsIo = "2.14.0"
 shizuku = "13.1.5"
 tomcatAnnotations = "6.0.53"
 junit = "4.13.2"
@@ -73,6 +75,11 @@ grpc-protobuf-lite = { module = "io.grpc:grpc-protobuf-lite", version.ref = "grp
 grpc-stub = { module = "io.grpc:grpc-stub", version.ref = "grpc" }
 grpc-kotlin-stub = { module = "io.grpc:grpc-kotlin-stub", version.ref = "grpcKotlin" }
 protobuf-javalite = { module = "com.google.protobuf:protobuf-javalite", version.ref = "protobuf" }
+protobuf-java = { module = "com.google.protobuf:protobuf-java", version.ref = "protobuf" }
+guava = { module = "com.google.guava:guava", version.ref = "guava" }
+utp-guava = { module = "com.google.guava:guava", version.ref = "guavaJvm" }
+netty-bom = { module = "io.netty:netty-bom", version.ref = "netty" }
+commons-io = { module = "commons-io:commons-io", version.ref = "commonsIo" }
 
 shizuku-api = { module = "dev.rikka.shizuku:api", version.ref = "shizuku" }
 shizuku-provider = { module = "dev.rikka.shizuku:provider", version.ref = "shizuku" }

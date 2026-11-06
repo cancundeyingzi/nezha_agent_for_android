@@ -15,6 +15,9 @@
 
 # Gradle
 .gradle
+# The local libs.versions.toml import generates only empty=incomingCatalogForLibs0 here.
+# Revisit this scope if settings or version catalogs start resolving external dependencies.
+/settings-gradle.lockfile
 # Unanchored so it covers every module's build dir, not just the root one.
 build/
 
